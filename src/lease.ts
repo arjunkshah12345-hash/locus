@@ -5,6 +5,23 @@ export type Surface = {
 
 export type IntentStatus = "active" | "ready" | "landed" | "abandoned";
 
+export type CheckResult = {
+  name: string;
+  passed: boolean;
+  detail: string;
+};
+
+export type Capsule = {
+  id: string;
+  goal: string;
+  agentId: string;
+  evidence: CheckResult[];
+  rejected: { id: string; goal: string }[];
+  file: string;
+};
+
+export type RefereeVerdict = "land_a" | "land_b" | "synthesize" | "human";
+
 export type Intent = {
   id: string;
   title: string;
@@ -18,6 +35,11 @@ export type Intent = {
   remote: string | null;
   forkError: string | null;
   previewUrl: string | null;
+  headCommit: string | null;
+  checks: CheckResult[];
+  capsule: Capsule | null;
+  verdict: RefereeVerdict | null;
+  contextNotes: string[];
   createdAt: number;
   expiresAt: number;
   landedAt: number | null;
@@ -64,34 +86,38 @@ function holdsLease(intent: Intent): boolean {
   return intent.status === "active" || intent.status === "ready";
 }
 
+function copyChecks(checks: CheckResult[] | undefined): CheckResult[] {
+  return (checks ?? []).map((check) => ({ ...check }));
+}
+
+function copyCapsule(capsule: Capsule | null | undefined): Capsule | null {
+  if (!capsule) return null;
+  return {
+    ...capsule,
+    evidence: copyChecks(capsule.evidence),
+    rejected: capsule.rejected.map((item) => ({ ...item })),
+  };
+}
+
 export class LeaseStore {
   private intents: Intent[];
 
   constructor(initial: Intent[] = []) {
-    this.intents = initial.map((intent) => ({
-      ...intent,
-      surface: {
-        paths: [...intent.surface.paths],
-        symbols: [...intent.surface.symbols],
-      },
-      conflicts: [...intent.conflicts],
-    }));
+    this.intents = initial.map((intent) => this.clone(intent));
   }
 
   snapshot(): Intent[] {
-    return this.intents.map((intent) => ({
-      ...intent,
-      surface: {
-        paths: [...intent.surface.paths],
-        symbols: [...intent.surface.symbols],
-      },
-      conflicts: [...intent.conflicts],
-    }));
+    return this.intents.map((intent) => this.clone(intent));
   }
 
   list(now: number): Intent[] {
     this.expire(now);
     return this.snapshot();
+  }
+
+  get(id: string): Intent | null {
+    const intent = this.intents.find((item) => item.id === id);
+    return intent ? this.clone(intent) : null;
   }
 
   claim(input: ClaimInput, now: number): { intent: Intent; overlap: string[] } {
@@ -121,6 +147,11 @@ export class LeaseStore {
       remote: null,
       forkError: null,
       previewUrl: null,
+      headCommit: null,
+      checks: [],
+      capsule: null,
+      verdict: null,
+      contextNotes: [],
       createdAt: now,
       expiresAt: now + LEASE_TTL_MS,
       landedAt: null,
@@ -157,7 +188,7 @@ export class LeaseStore {
         "contended",
       );
     }
-    this.markLanded(intent, now);
+    this.markLanded(intent, now, []);
     this.recompute();
     return this.clone(intent);
   }
@@ -165,19 +196,65 @@ export class LeaseStore {
   decide(winnerId: string, now: number): { winner: Intent; abandoned: string[] } {
     this.expire(now);
     const winner = this.requireHolding(winnerId);
+    const rejected = this.intents.filter(
+      (other) =>
+        other.id !== winner.id && holdsLease(other) && overlaps(winner.surface, other.surface),
+    );
     const abandoned: string[] = [];
-    for (const other of this.intents) {
-      if (other.id === winner.id || !holdsLease(other)) continue;
-      if (!overlaps(winner.surface, other.surface)) continue;
+    for (const other of rejected) {
       other.status = "abandoned";
       other.abandonedReason = `lost to ${winner.id}`;
       other.contended = false;
       other.conflicts = [];
       abandoned.push(other.id);
     }
-    this.markLanded(winner, now);
+    this.markLanded(winner, now, rejected.map((item) => ({ id: item.id, goal: item.goal })));
     this.recompute();
     return { winner: this.clone(winner), abandoned };
+  }
+
+  fold(
+    input: { id: string; title: string; goal: string; agentId: string; memberIds: string[] },
+    now: number,
+  ): Intent {
+    this.expire(now);
+    const members = input.memberIds.map((id) => {
+      const intent = this.intents.find((item) => item.id === id);
+      if (!intent) throw new LeaseError(`Unknown intent ${id}`, "missing");
+      return intent;
+    });
+    const rejected = members.map((member) => ({ id: member.id, goal: member.goal }));
+    const paths = [...new Set(members.flatMap((member) => member.surface.paths))];
+    const symbols = [...new Set(members.flatMap((member) => member.surface.symbols))];
+    const checks = members
+      .filter((member) => member.checks.length > 0 && member.checks.every((check) => check.passed))
+      .flatMap((member) => member.checks);
+    for (const member of members) {
+      if (!holdsLease(member)) continue;
+      member.status = "abandoned";
+      member.abandonedReason = `folded into ${input.id}`;
+      member.contended = false;
+      member.conflicts = [];
+    }
+    this.claim(
+      {
+        id: input.id,
+        title: input.title,
+        goal: input.goal,
+        agentId: input.agentId,
+        surface: { paths, symbols },
+      },
+      now,
+    );
+    const stored = this.requireHolding(input.id);
+    stored.checks = copyChecks(checks);
+    stored.verdict = "synthesize";
+    stored.forkRepo = `i-${input.id}`;
+    stored.remote = `memory://locus/i-${input.id}`;
+    stored.previewUrl = `/preview/${input.id}`;
+    this.markLanded(stored, now, rejected);
+    this.recompute();
+    return this.clone(stored);
   }
 
   attachFork(
@@ -196,12 +273,63 @@ export class LeaseStore {
     return this.clone(intent);
   }
 
+  notePush(
+    repoName: string,
+    after: string,
+    files?: string[],
+    previewUrl?: string,
+  ): Intent | null {
+    const intent = this.intents.find((item) => item.forkRepo === repoName);
+    if (!intent || !holdsLease(intent)) return null;
+    intent.headCommit = after;
+    if (files && files.length > 0) intent.surface.paths = [...files];
+    intent.previewUrl = previewUrl ?? `/preview/${intent.id}`;
+    this.recompute();
+    return this.clone(intent);
+  }
+
+  setChecks(id: string, checks: CheckResult[]): void {
+    const intent = this.intents.find((item) => item.id === id);
+    if (!intent) throw new LeaseError(`Unknown intent ${id}`, "missing");
+    intent.checks = copyChecks(checks);
+  }
+
+  setVerdict(id: string, verdict: RefereeVerdict): void {
+    const intent = this.intents.find((item) => item.id === id);
+    if (!intent) throw new LeaseError(`Unknown intent ${id}`, "missing");
+    intent.verdict = verdict;
+  }
+
+  appendContext(id: string, note: string, now: number): Intent {
+    this.expire(now);
+    const intent = this.requireHolding(id);
+    intent.contextNotes.push(note);
+    return this.clone(intent);
+  }
+
   why(path: string): Intent[] {
     const key = `path:${path}`;
     return this.snapshot().filter(
       (intent) =>
         intent.status === "landed" && surfaceKeys(intent.surface).includes(key),
     );
+  }
+
+  brief(now: number): string {
+    const intents = this.list(now);
+    const lines = ["Active leases:"];
+    for (const intent of intents) {
+      if (!holdsLease(intent)) continue;
+      lines.push(
+        `- ${intent.agentId} holds ${intent.surface.paths.join(", ") || "no path"} for: ${intent.goal}`,
+      );
+    }
+    lines.push("Landed:");
+    for (const intent of intents) {
+      if (intent.status !== "landed" || !intent.capsule) continue;
+      lines.push(`- ${intent.capsule.file}: ${intent.goal}`);
+    }
+    return lines.join("\n");
   }
 
   private expire(now: number): void {
@@ -240,22 +368,43 @@ export class LeaseStore {
     return intent;
   }
 
-  private markLanded(intent: Intent, now: number): void {
+  private markLanded(
+    intent: Intent,
+    now: number,
+    rejected: { id: string; goal: string }[],
+  ): void {
     intent.status = "landed";
     intent.landedAt = now;
     intent.contended = false;
     intent.conflicts = [];
     intent.abandonedReason = null;
+    intent.capsule = {
+      id: intent.id,
+      goal: intent.goal,
+      agentId: intent.agentId,
+      evidence: copyChecks(intent.checks),
+      rejected: rejected.map((item) => ({ ...item })),
+      file: `.locus/landed/${intent.id}.json`,
+    };
   }
 
   private clone(intent: Intent): Intent {
     return {
       ...intent,
       surface: {
-        paths: [...intent.surface.paths],
-        symbols: [...intent.surface.symbols],
+        paths: [...(intent.surface?.paths ?? [])],
+        symbols: [...(intent.surface?.symbols ?? [])],
       },
-      conflicts: [...intent.conflicts],
+      conflicts: [...(intent.conflicts ?? [])],
+      checks: copyChecks(intent.checks),
+      capsule: copyCapsule(intent.capsule),
+      contextNotes: [...(intent.contextNotes ?? [])],
+      headCommit: intent.headCommit ?? null,
+      verdict: intent.verdict ?? null,
+      previewUrl: intent.previewUrl ?? null,
+      forkRepo: intent.forkRepo ?? null,
+      remote: intent.remote ?? null,
+      forkError: intent.forkError ?? null,
     };
   }
 }

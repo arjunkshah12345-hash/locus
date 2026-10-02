@@ -6,7 +6,9 @@
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "demo": "node --experimental-strip-types demo/run.ts"
+    "demo": "node --experimental-strip-types demo/run.ts",
+    "mcp": "node --experimental-strip-types mcp/server.ts",
+    "subscribe": "node scripts/subscribe-events.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261001.1",

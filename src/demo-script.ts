@@ -1,4 +1,5 @@
 import { LeaseStore, type Intent } from "./lease.ts";
+import { applyReferee, type Decision } from "./referee.ts";
 
 export type DemoTask = {
   id: string;
@@ -29,7 +30,7 @@ export const DEMO_TASKS: DemoTask[] = [
   {
     id: "flag-audit",
     title: "Audit flag writes",
-    goal: "Record who called setFlag and when.",
+    goal: "Audit flag writes by recording who called setFlag.",
     agentId: "agent-audit",
     paths: ["src/flags.ts"],
     symbols: ["src/flags.ts#setFlag"],
@@ -66,18 +67,16 @@ export const DEMO_TASKS: DemoTask[] = [
     paths: ["src/log.ts"],
     symbols: [],
   },
-  {
-    id: "reader",
-    title: "Ask why, then claim health",
-    goal: "Read why src/index.ts changed, then add a health route on a free file.",
-    agentId: "agent-reader",
-    paths: ["src/health.ts"],
-    symbols: [],
-  },
 ];
 
 const AUTO_LAND = ["rate-limit", "docs", "auth", "obs"];
 const ARENA = ["flag-default", "flag-audit", "flag-default-b"];
+
+function forkAndPush(store: LeaseStore, id: string, paths: string[]): void {
+  const repo = `i-${id}`;
+  store.attachFork(id, { forkRepo: repo, remote: `memory://locus/${repo}` });
+  store.notePush(repo, `c0${id}`, paths);
+}
 
 export function runDemo(now: number): { intents: Intent[]; log: string[] } {
   const store = new LeaseStore();
@@ -94,30 +93,53 @@ export function runDemo(now: number): { intents: Intent[]; log: string[] } {
       },
       now,
     );
+    forkAndPush(store, intent.id, task.paths);
     log.push(
       overlap.length === 0
-        ? `claim ${intent.id} by ${intent.agentId}`
+        ? `claim ${intent.id} by ${intent.agentId} fork i-${intent.id}`
         : `claim ${intent.id} by ${intent.agentId} overlaps ${overlap.join(" ")}`,
     );
+    log.push(`push i-${intent.id} preview /preview/${intent.id}`);
   }
 
   for (const id of AUTO_LAND) {
     store.ready(id, now);
     store.land(id, now);
-    log.push(`landed ${id}`);
+    log.push(`landed ${id} -> .locus/landed/${id}.json`);
   }
 
   for (const id of ARENA) store.ready(id, now);
 
+  const why = store.why("src/index.ts").map((intent) => intent.id);
+  log.push(`why src/index.ts: ${why.join(", ")}`);
+
+  const blocked = store
+    .list(now)
+    .filter((intent) => intent.status === "active" || intent.status === "ready")
+    .some((intent) => intent.surface.paths.includes("src/flags.ts"));
+  const readerPaths = blocked ? ["src/health.ts"] : ["src/flags.ts"];
+  if (blocked) log.push("reader avoided src/flags.ts");
+  store.claim(
+    {
+      id: "reader",
+      title: "Ask why, then claim health",
+      goal: "Read why src/index.ts changed, then add a health route on a free file.",
+      agentId: "agent-reader",
+      surface: { paths: readerPaths, symbols: [] },
+    },
+    now,
+  );
+  forkAndPush(store, "reader", readerPaths);
+  log.push(`claim reader on ${readerPaths[0]}`);
+
   const intents = store.list(now);
   const arena = intents.filter((intent) => intent.contended).map((intent) => intent.id);
   log.push(`arena: ${arena.join(", ")}`);
-  const why = store.why("src/index.ts").map((intent) => intent.id);
-  log.push(`why src/index.ts: ${why.join(", ")}`);
-  const reader = intents.find((intent) => intent.id === "reader");
-  log.push(
-    `reader status: ${reader?.status ?? "missing"}${reader?.contended ? " contended" : ""}`,
-  );
-
   return { intents, log };
+}
+
+export function resolveArena(intents: Intent[], now: number): { intents: Intent[]; decision: Decision | null } {
+  const store = new LeaseStore(intents);
+  const decision = applyReferee(store, now);
+  return { intents: store.list(now), decision };
 }

@@ -38,6 +38,8 @@ export function boardHtml(): string {
       cursor: pointer;
     }
     button.primary { background: var(--orange); border-color: var(--orange); color: #1a1006; }
+    header div { display: flex; gap: 8px; }
+    a { color: var(--orange); }
     button:disabled { opacity: 0.5; cursor: wait; }
     .stats { display: flex; gap: 18px; color: var(--muted); padding: 8px 0 18px; }
     .stats strong { color: var(--ink); font-weight: 500; }
@@ -72,7 +74,10 @@ export function boardHtml(): string {
       <h1>Locus</h1>
       <p>Agents claim a surface. The canon lands the winner.</p>
     </div>
-    <button class="primary" id="seed" type="button">Seed demo</button>
+    <div>
+      <button id="seed" type="button">Seed demo</button>
+      <button class="primary" id="resolve" type="button">Resolve arena</button>
+    </div>
   </header>
   <main>
     <div class="stats" id="stats"></div>
@@ -82,6 +87,7 @@ export function boardHtml(): string {
     const stats = document.querySelector("#stats");
     const grid = document.querySelector("#grid");
     const seed = document.querySelector("#seed");
+    const resolve = document.querySelector("#resolve");
 
     function pill(intent) {
       if (intent.contended) return "contended";
@@ -129,6 +135,24 @@ export function boardHtml(): string {
           clash.textContent = "Overlaps " + intent.conflicts.join(", ");
           card.append(clash);
         }
+        if (intent.previewUrl) {
+          const link = document.createElement("a");
+          link.href = intent.previewUrl;
+          link.textContent = "Preview";
+          card.append(link);
+        }
+        if (intent.capsule && intent.capsule.file) {
+          const why = document.createElement("p");
+          why.className = "meta";
+          why.textContent = intent.capsule.file;
+          card.append(why);
+        }
+        if (intent.verdict) {
+          const verdict = document.createElement("p");
+          verdict.className = "meta";
+          verdict.textContent = "Referee " + intent.verdict;
+          card.append(verdict);
+        }
         if (intent.abandonedReason) {
           const reason = document.createElement("p");
           reason.className = "meta";
@@ -168,6 +192,13 @@ export function boardHtml(): string {
       seed.disabled = true;
       await fetch("/api/demo/seed", { method: "POST" });
       seed.disabled = false;
+      await load();
+    });
+
+    resolve.addEventListener("click", async () => {
+      resolve.disabled = true;
+      await fetch("/api/referee", { method: "POST" });
+      resolve.disabled = false;
       await load();
     });
 

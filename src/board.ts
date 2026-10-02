@@ -1,11 +1,17 @@
 import { LeaseError, LeaseStore, type Intent, type Surface } from "./lease.ts";
 import { forkIntent, type ArtifactsNamespace } from "./artifacts.ts";
 import { runDemo } from "./demo-script.ts";
+import { applyReferee } from "./referee.ts";
+import { handleMcp, type McpMessage } from "./mcp.ts";
+import { previewUrlFor, type PushEvent } from "./preview.ts";
 
 export interface Env {
   BOARD: DurableObjectNamespace;
   ARTIFACTS?: ArtifactsNamespace;
   CANON_REPO?: string;
+  REFEREE?: {
+    create(options: { id?: string; params?: { intentIds: string[] } }): Promise<unknown>;
+  };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -51,11 +57,58 @@ export class LeaseBoard implements DurableObject {
         await save(this.state, store);
         return json({ intents: store.list(Date.now()), log });
       }
+      if (url.pathname === "/referee" && request.method === "POST") {
+        const store = await load(this.state);
+        const decision = applyReferee(store, Date.now());
+        await save(this.state, store);
+        return json({ decision, intents: store.list(Date.now()) });
+      }
+      if (url.pathname === "/events" && request.method === "POST") {
+        const event = (await request.json()) as PushEvent;
+        if (event.type !== "cf.artifacts.repo.pushed" || !event.source?.repoName) {
+          return json({ ignored: true });
+        }
+        const store = await load(this.state);
+        const match = store.snapshot().find((item) => item.forkRepo === event.source?.repoName);
+        const preview = match ? previewUrlFor(match.id, event) : undefined;
+        const intent = store.notePush(
+          event.source.repoName,
+          event.payload?.after ?? "unknown",
+          event.payload?.files,
+          preview,
+        );
+        await save(this.state, store);
+        return json({ intent });
+      }
+      if (url.pathname === "/mcp" && request.method === "POST") {
+        const message = (await request.json()) as McpMessage;
+        const store = await load(this.state);
+        try {
+          const result = handleMcp(store, message, Date.now());
+          await save(this.state, store);
+          return json({ jsonrpc: "2.0", id: message.id ?? null, result });
+        } catch (error) {
+          const messageText = error instanceof Error ? error.message : "mcp failed";
+          return json({
+            jsonrpc: "2.0",
+            id: message.id ?? null,
+            error: { code: -32000, message: messageText },
+          });
+        }
+      }
       if (url.pathname === "/why" && request.method === "GET") {
         const path = url.searchParams.get("path");
         if (!path) return json({ error: "path is required", code: "invalid" }, 400);
         const store = await load(this.state);
         return json({ intents: store.why(path) });
+      }
+
+      const one = url.pathname.match(/^\/intents\/([^/]+)$/);
+      if (one && request.method === "GET") {
+        const store = await load(this.state);
+        const intent = store.get(decodeURIComponent(one[1]));
+        if (!intent) return json({ error: "Unknown intent", code: "missing" }, 404);
+        return json({ intent });
       }
 
       const match = url.pathname.match(/^\/intents\/([^/]+)\/(heartbeat|ready|land|decide)$/);
@@ -135,6 +188,10 @@ export class LeaseBoard implements DurableObject {
         const message = error instanceof Error ? error.message : "fork failed";
         store.attachFork(intent.id, { forkError: message });
       }
+    } else {
+      const repo = `i-${intent.id}`.slice(0, 63);
+      store.attachFork(intent.id, { forkRepo: repo, remote: `memory://locus/${repo}` });
+      store.notePush(repo, "pending", intent.surface.paths);
     }
 
     await save(this.state, store);

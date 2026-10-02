@@ -7,5 +7,16 @@
   "durable_objects": {
     "bindings": [{ "name": "BOARD", "class_name": "LeaseBoard" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LeaseBoard"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LeaseBoard"] }],
+  "workflows": [
+    {
+      "name": "locus-referee",
+      "binding": "REFEREE",
+      "class_name": "RefereeWorkflow"
+    }
+  ],
+  "queues": {
+    "producers": [{ "binding": "EVENTS", "queue": "locus-artifact-events" }],
+    "consumers": [{ "queue": "locus-artifact-events", "max_batch_size": 10 }]
+  }
 }

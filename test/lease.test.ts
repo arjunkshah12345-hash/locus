@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { LEASE_TTL_MS, LeaseError, LeaseStore } from "../src/lease.ts";
-import { runDemo } from "../src/demo-script.ts";
+import { runDemo, resolveArena } from "../src/demo-script.ts";
+import { callTool } from "../src/mcp.ts";
 
 const now = Date.UTC(2026, 9, 2);
 
@@ -92,6 +93,26 @@ test("the demo lands disjoint work and parks the flag arena", () => {
   }
   assert.equal(byId.get("reader")?.status, "active");
   assert.equal(byId.get("reader")?.contended, false);
+  assert.deepEqual(byId.get("reader")?.surface.paths, ["src/health.ts"]);
+  assert.equal(byId.get("rate-limit")?.capsule?.file, ".locus/landed/rate-limit.json");
+  assert.equal(byId.get("rate-limit")?.previewUrl, "/preview/rate-limit");
   assert.match(log.join("\n"), /arena: flag-default, flag-audit, flag-default-b/);
   assert.match(log.join("\n"), /why src\/index.ts: rate-limit/);
+  assert.match(log.join("\n"), /reader avoided src\/flags.ts/);
+});
+
+test("the referee folds the passing flag intents and keeps the why file", () => {
+  const open = runDemo(now);
+  const { intents, decision } = resolveArena(open.intents, now);
+  const byId = new Map(intents.map((intent) => [intent.id, intent]));
+  assert.equal(decision?.verdict, "synthesize");
+  assert.equal(decision?.winnerId, "flag-synthesis");
+  assert.equal(byId.get("flag-synthesis")?.status, "landed");
+  assert.equal(byId.get("flag-synthesis")?.capsule?.file, ".locus/landed/flag-synthesis.json");
+  assert.equal(byId.get("flag-default")?.status, "abandoned");
+  assert.equal(byId.get("flag-audit")?.abandonedReason, "folded into flag-synthesis");
+  const why = callTool(new LeaseStore(intents), { name: "ask_why", arguments: { path: "src/flags.ts" } }, now) as {
+    intents: { id: string }[];
+  };
+  assert.deepEqual(why.intents.map((intent) => intent.id), ["flag-synthesis"]);
 });

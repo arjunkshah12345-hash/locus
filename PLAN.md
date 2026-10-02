@@ -267,20 +267,19 @@ src/demo-script.ts      eight-agent story
 src/artifacts.ts        fork + one-time token
 src/board.ts            Durable Object
 src/page.ts             board UI
-src/index.ts            Worker routes
+src/index.ts            Worker routes, queue consumer
+src/referee.ts          arena scoring
+src/workflow.ts         RefereeWorkflow
+src/mcp.ts              MCP tools
+mcp/server.ts           stdio proxy to /mcp
+src/preview.ts          preview pages
 fixtures/sample/        canon the agents edit
 test/lease.test.ts
 demo/run.ts             npm run demo
 wrangler.jsonc
 ```
 
-Later, same repo, only when the day-1 path is solid:
-
-```
-src/workflow.ts         referee and land
-src/queue.ts            Artifacts push consumer
-mcp/                    claim, heartbeat, ask_why
-```
+The queue consumer, referee workflow, and MCP server ship in this repo.
 
 Host on `arjunkshah12345-hash/locus`. This is not a SuperCompress product repository.
 
@@ -290,7 +289,7 @@ Today is October 2. Leave October 14 empty.
 
 | When | Ship | Gate |
 | --- | --- | --- |
-| Oct 2–3 | Lease engine, board, demo seed, fork helper. **In progress.** | `npm test` and `npm run demo` |
+| Oct 2–3 | Lease engine, board, demo seed, fork helper, referee, queue, workflow, MCP, previews. | `npm test` and `npm run demo` |
 | Oct 2–3 spike | Paid Workers account. Canon repo, fork, token, `readFile`, push event into a Queue, one preview URL. | Stop and redesign the preview bridge if Workers Builds cannot preview a pushed branch |
 | Oct 4–5 | Claim API creates a real fork. One scripted agent edits a file and pushes. | `git push` to the fork shows up as a push event |
 | Oct 6–7 | Board wired to live forks and preview URLs | A card shows a real preview |
@@ -327,20 +326,14 @@ Leave these out. They sink the video.
 | One board, preview on the card, `npm run demo` | Product, 25% |
 | Workers, Artifacts forks, Queues, Workflows, Workers Builds | Mandatory platform |
 
-## Day 1, October 2
+## Shipped
 
-Shipped in this repo, and checked on October 2:
+Checked October 2, 2026:
 
-- Lease rules and tests, including decide, expiry, and the demo story. `npm test` passes.
-- Durable Object board and the HTTP API above. Local `wrangler dev`: seed shows 1 active, 3 contended, 4 landed. Landing `flag-default` abandons the other two flag intents.
-- Board UI with seed and land. The same flow works in a browser against the local worker.
-- Artifacts fork helper matching the current binding (`get`, `info`, `readFile`, `fork`, `createToken`)
-- Sample canon under `fixtures/sample`
-- `npm run demo` prints the eight-agent story with no Cloudflare credentials
+- Lease rules, forks, push notes, why capsules, and tests. `npm test` and `npm run demo`.
+- Board with seed, previews, and resolve. The reader avoids a leased file.
+- Referee: the flag arena synthesizes the two passing intents and abandons the one that flips the default. The why file is `.locus/landed/flag-synthesis.json`.
+- Queue consumer for `cf.artifacts.repo.pushed`, `RefereeWorkflow`, and MCP tools (`/mcp` and `mcp/server.ts`).
+- Artifacts fork helper. A live fork runs when `ARTIFACTS` and `CANON_REPO` are set. `npm run subscribe` registers the event subscription when account credentials are present.
 
-Not shipped yet, on purpose:
-
-- A live Artifacts namespace. Claim stores `forkRepo: null` until `ARTIFACTS` and `CANON_REPO` are configured.
-- Push-event Queue, referee Workflow, Workers Builds preview bridge, MCP server.
-
-Next action is the spike: create the canon repo with the binding, fork once, push once, and catch `cf.artifacts.repo.pushed`.
+The contest form is filled by hand, once, on October 13. The rules void an automated entry.
