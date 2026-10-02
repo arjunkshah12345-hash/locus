@@ -2,48 +2,53 @@
 
 Agents claim a surface, work in their own fork, and the canon only lands the change that wins.
 
-This is the Cloudflare Git competition entry. The spec is [PLAN.md](PLAN.md). The sample canon the agents edit is [fixtures/sample](fixtures/sample).
+Create a project, claim a path or a symbol, and watch overlaps land in the arena. **Load flag swarm** drops eight agents onto one canon. **Watch it arrive** plays that swarm in. **Resolve arena** folds the passing edits into one canon change and writes `.locus/landed/<id>.json`. The spec is [PLAN.md](PLAN.md).
 
 ## Run it
 
 ```bash
 npm install
 npm test
-npm run demo
 npm run dev
 ```
 
-Open the URL Wrangler prints. **Play** brings the eight agents in one at a time and opens the arena on `src/flags.ts`, with each patch visible. **Resolve arena** folds the two passing edits into one canon change and abandons the one that flips the default.
+Open the URL Wrangler prints. `npm run demo` prints the same flag-service story with no Cloudflare account.
 
-`npm run demo` prints the same story with no Cloudflare account.
+## What you can do
 
-## API
-
-| Method | Path | Effect |
-| --- | --- | --- |
-| `GET` | `/api/intents` | Board |
-| `POST` | `/api/intents` | Claim a surface. Forks the canon when Artifacts is bound. Otherwise it records a memory fork. |
-| `POST` | `/api/intents/:id/ready` | Mark ready |
-| `POST` | `/api/intents/:id/land` | Land a free intent and write its why capsule |
-| `POST` | `/api/intents/:id/decide` | Land this intent and abandon overlaps |
-| `POST` | `/api/referee` | Score the arena and fold or land |
-| `POST` | `/api/events` | Accept `cf.artifacts.repo.pushed` |
-| `POST` | `/api/demo/seed` | Load the eight-agent story |
-| `GET` | `/api/why?path=src/index.ts` | Landed capsules for that path |
-| `GET` | `/preview/:id` | Preview of one intent |
-| `POST` | `/mcp` | MCP tools: `list_active`, `claim`, `heartbeat`, `append_context`, `mark_ready`, `ask_why` |
-
-Point a stdio MCP client at the local worker:
+- Create a project and claim a surface. A second claim on the same path or symbol opens the arena.
+- Land a free intent, hold the lease, mark it ready, or add context for the next agent.
+- Ask why a file looks the way it does. The answer is the landed capsule.
+- Point an agent at `POST /mcp` (`list_active`, `claim`, `heartbeat`, `append_context`, `mark_ready`, `ask_why`).
 
 ```bash
 LOCUS_URL=http://127.0.0.1:8787 npm run mcp
 ```
 
+## API
+
+Project routes live under `/api/projects/:id`. The same actions exist on the default project without that prefix.
+
+| Method | Path | Effect |
+| --- | --- | --- |
+| `GET` | `/api/projects` | Project list |
+| `POST` | `/api/projects` | Create a project |
+| `GET` | `/api/projects/:id/state` | Intents, activity, and the brief |
+| `POST` | `/api/projects/:id/intents` | Claim a surface |
+| `POST` | `/api/projects/:id/intents/:intent/ready` | Mark ready |
+| `POST` | `/api/projects/:id/intents/:intent/land` | Land a free intent and write its why capsule |
+| `POST` | `/api/projects/:id/intents/:intent/decide` | Land this intent and abandon overlaps |
+| `POST` | `/api/projects/:id/intents/:intent/context` | Append a context note |
+| `POST` | `/api/projects/:id/referee` | Score the arena and fold or land |
+| `POST` | `/api/projects/:id/sample` | Load the eight-agent story |
+| `GET` | `/api/projects/:id/why?path=src/flags.ts` | Landed capsules for that path |
+| `GET` | `/preview/:id` | Preview of one intent |
+| `POST` | `/mcp` | MCP tools |
+
 A claim body:
 
 ```json
 {
-  "id": "rate-limit",
   "title": "Rate limit /flags",
   "goal": "Reject bursts against the flag API.",
   "agentId": "agent-rate",
@@ -53,26 +58,29 @@ A claim body:
 
 The claim response may include a Git token once. The board does not store it.
 
+## Deploy
+
+```bash
+npx wrangler login
+npx wrangler deploy
+```
+
+The Worker uses a Durable Object lease board, the `locus-artifact-events` queue, and the `locus-referee` workflow. Login is interactive.
+
 ## Artifacts
 
-Wrangler 4.145 or newer. Add the binding next to the queue and workflow already in `wrangler.jsonc`:
+Wrangler 4.145 or newer. Add this binding when the account can create Artifacts repos:
 
 ```jsonc
 "artifacts": [{ "binding": "ARTIFACTS", "namespace": "locus" }]
 ```
 
-Set `CANON_REPO` to the canon repository name. A claim then calls `get`, `info`, `readFile` for `AGENTS.md`, `fork`, and `createToken("write")` if the fork result has no token.
-
-Push events land on the `locus-artifact-events` queue. The consumer notes the commit, sets the preview URL, and starts `RefereeWorkflow`. Without the workflow binding it runs the referee in the same turn.
-
-To subscribe the account, set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `LOCUS_QUEUE_ID`, then run `npm run subscribe`.
-
-Workers Builds preview URLs are accepted on the push payload as `payload.previewUrl` when they are `https` URLs. Otherwise the card links to `/preview/:id`.
+Set `CANON_REPO`. A claim then calls `get`, `info`, `readFile` for `AGENTS.md`, `fork`, and `createToken("write")` if the fork result has no token. Push events on the queue update the matching intent and start `RefereeWorkflow`. To subscribe the account, set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `LOCUS_QUEUE_ID`, then run `npm run subscribe`.
 
 ## Submit
 
-Form: https://www.cloudflare.com/git-competition/submit/
+https://www.cloudflare.com/git-competition/submit/
 
-Team name: **Locus**. Source: https://github.com/arjunkshah12345-hash/locus. License: Apache-2.0. Send one 5–10 minute video and these run instructions. The official rules void a scripted or second entry, so submit the form once, by hand.
+Team name: **Locus**. Source: https://github.com/arjunkshah12345-hash/locus. License: Apache-2.0. One submission, sent by hand, with a 5–10 minute video.
 
 License: Apache-2.0.

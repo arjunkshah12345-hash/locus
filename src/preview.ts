@@ -32,10 +32,10 @@ export function previewHtml(intent: Intent): string {
   <meta charset="utf-8" />
   <title>Preview ${title}</title>
   <style>
-    body { margin: 0; font: 16px/1.45 Georgia, serif; background: #10110f; color: #f4f0e6; }
+    body { margin: 0; font: 16px/1.45 ui-sans-serif, system-ui, sans-serif; background: #f7f7f8; color: #111; }
     main { width: min(720px, calc(100% - 32px)); margin: 32px auto; }
-    a { color: #f6821f; }
-    pre { background: #1c1b17; padding: 16px; border-radius: 12px; overflow: auto; }
+    a { color: #e06c12; }
+    pre { background: #111; color: #f6f6f6; padding: 16px; border-radius: 8px; overflow: auto; }
   </style>
 </head>
 <body>

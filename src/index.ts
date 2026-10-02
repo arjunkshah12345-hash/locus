@@ -23,12 +23,21 @@ export default {
     }
     if (url.pathname.startsWith("/preview/")) {
       const id = decodeURIComponent(url.pathname.slice("/preview/".length));
-      const response = await board(env).fetch(`https://locus/intents/${encodeURIComponent(id)}`);
-      if (!response.ok) return new Response("This preview has no intent yet.", { status: 404 });
-      const body = (await response.json()) as { intent: Intent };
-      return new Response(previewHtml(body.intent), {
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      const listed = await board(env).fetch("https://locus/projects");
+      const catalog = (await listed.json()) as { projects?: { id: string }[] };
+      const projects = catalog.projects ?? [];
+      const candidates = ["canon", ...projects.map((project) => project.id)];
+      for (const projectId of candidates) {
+        const response = await board(env).fetch(
+          `https://locus/projects/${encodeURIComponent(projectId)}/intents/${encodeURIComponent(id)}`,
+        );
+        if (!response.ok) continue;
+        const body = (await response.json()) as { intent: Intent };
+        return new Response(previewHtml(body.intent), {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+      return new Response("This preview has no intent yet.", { status: 404 });
     }
     if (url.pathname === "/mcp" && request.method === "POST") {
       return board(env).fetch(new Request("https://locus/mcp", request));
@@ -38,7 +47,7 @@ export default {
       next.pathname = url.pathname.slice("/api".length) || "/";
       return board(env).fetch(new Request(next, request));
     }
-    if (url.pathname === "/") {
+    if (url.pathname === "/" || url.pathname.startsWith("/p/")) {
       return new Response(boardHtml(), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
