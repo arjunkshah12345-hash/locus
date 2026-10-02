@@ -44,6 +44,12 @@ export function boardHtml(): string {
     .stats { display: flex; gap: 18px; color: var(--muted); padding: 8px 0 18px; }
     .stats strong { color: var(--ink); font-weight: 500; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; padding-bottom: 48px; }
+    .banner { min-height: 1.4em; color: var(--orange); margin: 0 0 12px; }
+    .arena { border: 1px solid var(--orange); border-radius: 18px; padding: 16px; margin-bottom: 16px; }
+    .arena h2 { margin: 0 0 6px; font-size: 22px; font-weight: 500; }
+    .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+    .lane { background: #141410; border-radius: 12px; padding: 12px; }
+    .lane pre, article pre { margin: 0; white-space: pre-wrap; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
     article {
       background: var(--card);
       border: 1px solid var(--line);
@@ -75,23 +81,70 @@ export function boardHtml(): string {
       <p>Agents claim a surface. The canon lands the winner.</p>
     </div>
     <div>
-      <button id="seed" type="button">Seed demo</button>
+      <button id="seed" type="button">Seed</button>
+      <button id="play" type="button">Play</button>
       <button class="primary" id="resolve" type="button">Resolve arena</button>
     </div>
   </header>
   <main>
     <div class="stats" id="stats"></div>
+    <p class="banner" id="banner"></p>
+    <section id="arena" hidden></section>
     <div class="grid" id="grid"></div>
   </main>
   <script>
     const stats = document.querySelector("#stats");
     const grid = document.querySelector("#grid");
     const seed = document.querySelector("#seed");
+    const play = document.querySelector("#play");
     const resolve = document.querySelector("#resolve");
+    const banner = document.querySelector("#banner");
+    const arena = document.querySelector("#arena");
 
     function pill(intent) {
       if (intent.contended) return "contended";
       return intent.status;
+    }
+
+    function lane(intent) {
+      const card = document.createElement("div");
+      card.className = "lane";
+      const title = document.createElement("h2");
+      title.textContent = intent.title;
+      const goal = document.createElement("p");
+      goal.textContent = intent.goal;
+      const patch = document.createElement("pre");
+      patch.textContent = intent.patch || intent.surface.paths.join(", ");
+      card.append(title, goal, patch);
+      return card;
+    }
+
+    function renderArena(intents) {
+      const contended = intents.filter((intent) => intent.contended);
+      const synthesis = intents.find((intent) => intent.id === "flag-synthesis");
+      arena.replaceChildren();
+      if (contended.length >= 2) {
+        arena.hidden = false;
+        const title = document.createElement("h2");
+        title.textContent = "Arena · " + (contended[0].surface.paths[0] || "overlap");
+        const note = document.createElement("p");
+        note.textContent = contended.length + " agents hold the same file. The canon has not picked.";
+        const lanes = document.createElement("div");
+        lanes.className = "lanes";
+        for (const intent of contended) lanes.append(lane(intent));
+        arena.append(title, note, lanes);
+        return;
+      }
+      if (synthesis) {
+        arena.hidden = false;
+        const title = document.createElement("h2");
+        title.textContent = "Canon accepted one change";
+        const note = document.createElement("p");
+        note.textContent = synthesis.capsule ? synthesis.capsule.file : synthesis.title;
+        arena.append(title, note, lane(synthesis));
+        return;
+      }
+      arena.hidden = true;
     }
 
     function render(intents) {
@@ -101,6 +154,7 @@ export function boardHtml(): string {
         else counts[intent.status] = (counts[intent.status] || 0) + 1;
       }
       stats.innerHTML = "<span><strong>" + counts.active + "</strong> active</span><span><strong>" + counts.contended + "</strong> contended</span><span><strong>" + counts.landed + "</strong> landed</span><span><strong>" + counts.abandoned + "</strong> abandoned</span>";
+      renderArena(intents);
       grid.replaceChildren();
       if (intents.length === 0) {
         const empty = document.createElement("p");
@@ -134,6 +188,11 @@ export function boardHtml(): string {
           clash.className = "meta";
           clash.textContent = "Overlaps " + intent.conflicts.join(", ");
           card.append(clash);
+        }
+        if (intent.patch) {
+          const patch = document.createElement("pre");
+          patch.textContent = intent.patch;
+          card.append(patch);
         }
         if (intent.previewUrl) {
           const link = document.createElement("a");
@@ -190,8 +249,23 @@ export function boardHtml(): string {
 
     seed.addEventListener("click", async () => {
       seed.disabled = true;
+      banner.textContent = "Eight agents claimed at once.";
       await fetch("/api/demo/seed", { method: "POST" });
       seed.disabled = false;
+      await load();
+    });
+
+    play.addEventListener("click", async () => {
+      play.disabled = true;
+      const response = await fetch("/api/demo/seed", { method: "POST" });
+      const body = await response.json();
+      const frames = body.frames || [];
+      for (const frame of frames) {
+        banner.textContent = frame.label;
+        render(frame.intents || []);
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      play.disabled = false;
       await load();
     });
 

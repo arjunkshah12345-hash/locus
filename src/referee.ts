@@ -4,6 +4,7 @@ import {
   type Intent,
   type RefereeVerdict,
 } from "./lease.ts";
+import { SYNTHESIS_PATCH } from "./patches.ts";
 
 export type Decision = {
   verdict: RefereeVerdict;
@@ -118,6 +119,7 @@ export function applyReferee(store: LeaseStore, now: number): Decision | null {
       },
       now,
     );
+    if (id === "flag-synthesis") store.setPatch(id, SYNTHESIS_PATCH);
     return { ...decision, winnerId: id };
   }
 

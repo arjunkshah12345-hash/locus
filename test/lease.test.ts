@@ -109,6 +109,8 @@ test("the referee folds the passing flag intents and keeps the why file", () => 
   assert.equal(decision?.winnerId, "flag-synthesis");
   assert.equal(byId.get("flag-synthesis")?.status, "landed");
   assert.equal(byId.get("flag-synthesis")?.capsule?.file, ".locus/landed/flag-synthesis.json");
+  assert.match(byId.get("flag-synthesis")?.patch ?? "", /audit.push/);
+  assert.ok(open.frames.length >= 8);
   assert.equal(byId.get("flag-default")?.status, "abandoned");
   assert.equal(byId.get("flag-audit")?.abandonedReason, "folded into flag-synthesis");
   const why = callTool(new LeaseStore(intents), { name: "ask_why", arguments: { path: "src/flags.ts" } }, now) as {

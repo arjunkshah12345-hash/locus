@@ -1,5 +1,6 @@
 import { LeaseStore, type Intent } from "./lease.ts";
 import { applyReferee, type Decision } from "./referee.ts";
+import { PATCHES } from "./patches.ts";
 
 export type DemoTask = {
   id: string;
@@ -78,9 +79,17 @@ function forkAndPush(store: LeaseStore, id: string, paths: string[]): void {
   store.notePush(repo, `c0${id}`, paths);
 }
 
-export function runDemo(now: number): { intents: Intent[]; log: string[] } {
+export function runDemo(now: number): {
+  intents: Intent[];
+  log: string[];
+  frames: { label: string; intents: Intent[] }[];
+} {
   const store = new LeaseStore();
   const log: string[] = [];
+  const frames: { label: string; intents: Intent[] }[] = [];
+  const snap = (label: string) => {
+    frames.push({ label, intents: store.list(now) });
+  };
 
   for (const task of DEMO_TASKS) {
     const { intent, overlap } = store.claim(
@@ -94,21 +103,28 @@ export function runDemo(now: number): { intents: Intent[]; log: string[] } {
       now,
     );
     forkAndPush(store, intent.id, task.paths);
+    const patch = PATCHES[task.id];
+    if (patch) store.setPatch(task.id, patch);
     log.push(
       overlap.length === 0
         ? `claim ${intent.id} by ${intent.agentId} fork i-${intent.id}`
         : `claim ${intent.id} by ${intent.agentId} overlaps ${overlap.join(" ")}`,
     );
     log.push(`push i-${intent.id} preview /preview/${intent.id}`);
+    snap(log[log.length - 1]);
   }
 
   for (const id of AUTO_LAND) {
     store.ready(id, now);
     store.land(id, now);
     log.push(`landed ${id} -> .locus/landed/${id}.json`);
+    snap(`landed ${id}`);
   }
 
-  for (const id of ARENA) store.ready(id, now);
+  for (const id of ARENA) {
+    store.ready(id, now);
+    snap(`${id} is ready`);
+  }
 
   const why = store.why("src/index.ts").map((intent) => intent.id);
   log.push(`why src/index.ts: ${why.join(", ")}`);
@@ -130,12 +146,16 @@ export function runDemo(now: number): { intents: Intent[]; log: string[] } {
     now,
   );
   forkAndPush(store, "reader", readerPaths);
+  const readerPatch = PATCHES.reader;
+  if (readerPatch) store.setPatch("reader", readerPatch);
   log.push(`claim reader on ${readerPaths[0]}`);
+  snap(log[log.length - 1]);
 
   const intents = store.list(now);
   const arena = intents.filter((intent) => intent.contended).map((intent) => intent.id);
   log.push(`arena: ${arena.join(", ")}`);
-  return { intents, log };
+  snap("arena open");
+  return { intents, log, frames };
 }
 
 export function resolveArena(intents: Intent[], now: number): { intents: Intent[]; decision: Decision | null } {

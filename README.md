@@ -13,11 +13,7 @@ npm run demo
 npm run dev
 ```
 
-Open the URL Wrangler prints.
-
-1. **Seed demo.** Eight agents claim the flag service. Four disjoint intents land and write a why file. Three overlap on `src/flags.ts`. The reader asks why `src/index.ts` changed, sees the flag file is leased, and claims `src/health.ts` instead.
-2. Open a **Preview** link. It shows what that fork would do to `GET /flags`.
-3. **Resolve arena.** The referee keeps the canon default off, folds the audit and the staged rollout together, and abandons the change that flips the default. The winner's why file is `.locus/landed/flag-synthesis.json`.
+Open the URL Wrangler prints. **Play** brings the eight agents in one at a time and opens the arena on `src/flags.ts`, with each patch visible. **Resolve arena** folds the two passing edits into one canon change and abandons the one that flips the default.
 
 `npm run demo` prints the same story with no Cloudflare account.
 

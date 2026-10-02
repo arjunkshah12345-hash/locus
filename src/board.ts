@@ -52,10 +52,10 @@ export class LeaseBoard implements DurableObject {
         return await this.claim(request);
       }
       if (url.pathname === "/demo/seed" && request.method === "POST") {
-        const { intents, log } = runDemo(Date.now());
+        const { intents, log, frames } = runDemo(Date.now());
         const store = new LeaseStore(intents);
         await save(this.state, store);
-        return json({ intents: store.list(Date.now()), log });
+        return json({ intents: store.list(Date.now()), log, frames });
       }
       if (url.pathname === "/referee" && request.method === "POST") {
         const store = await load(this.state);

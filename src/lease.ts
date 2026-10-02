@@ -35,6 +35,7 @@ export type Intent = {
   remote: string | null;
   forkError: string | null;
   previewUrl: string | null;
+  patch: string | null;
   headCommit: string | null;
   checks: CheckResult[];
   capsule: Capsule | null;
@@ -147,6 +148,7 @@ export class LeaseStore {
       remote: null,
       forkError: null,
       previewUrl: null,
+      patch: null,
       headCommit: null,
       checks: [],
       capsule: null,
@@ -288,6 +290,12 @@ export class LeaseStore {
     return this.clone(intent);
   }
 
+  setPatch(id: string, patch: string): void {
+    const intent = this.intents.find((item) => item.id === id);
+    if (!intent) throw new LeaseError(`Unknown intent ${id}`, "missing");
+    intent.patch = patch;
+  }
+
   setChecks(id: string, checks: CheckResult[]): void {
     const intent = this.intents.find((item) => item.id === id);
     if (!intent) throw new LeaseError(`Unknown intent ${id}`, "missing");
@@ -402,6 +410,7 @@ export class LeaseStore {
       headCommit: intent.headCommit ?? null,
       verdict: intent.verdict ?? null,
       previewUrl: intent.previewUrl ?? null,
+      patch: intent.patch ?? null,
       forkRepo: intent.forkRepo ?? null,
       remote: intent.remote ?? null,
       forkError: intent.forkError ?? null,

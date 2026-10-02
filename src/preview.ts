@@ -23,6 +23,7 @@ export function previewHtml(intent: Intent): string {
   const checks = (intent.checks ?? [])
     .map((check) => `${check.passed ? "pass" : "fail"} ${check.name}: ${check.detail}`)
     .join("\n");
+  const patch = intent.patch ?? "";
   const title = escapeHtml(intent.title);
   const goal = escapeHtml(intent.goal);
   return `<!doctype html>
@@ -43,6 +44,8 @@ export function previewHtml(intent: Intent): string {
     <h1>${title}</h1>
     <p>${goal}</p>
     <p>Agent ${escapeHtml(intent.agentId)}. Commit ${escapeHtml(intent.headCommit ?? "pending")}.</p>
+    <h2>Change</h2>
+    <pre>${escapeHtml(patch || "No patch recorded.")}</pre>
     <h2>Flag service</h2>
     <pre>${escapeHtml(JSON.stringify(body, null, 2))}</pre>
     <h2>Checks</h2>
