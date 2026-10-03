@@ -89,6 +89,7 @@ export function boardHtml(): string {
       font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
       background: #111; color: #f6f6f6; border-radius: 6px; padding: 10px;
     }
+    pre.code { background: #fff; color: var(--ink); border: 1px solid var(--line); max-height: 420px; overflow: auto; }
     .crumb { color: var(--muted); margin-bottom: 8px; }
     .crumb button { background: none; border: 0; padding: 0; color: var(--orange-deep); cursor: pointer; }
     .activity { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
@@ -349,11 +350,14 @@ export function boardHtml(): string {
     let flash = "";
     let currentProject = null;
 
-    async function renderBoard(id) {
-      paint(id, await api("/api/projects/" + encodeURIComponent(id) + "/state"));
+    async function renderBoard(id, ref) {
+      const branch = ref || "refs/heads/main";
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      const tree = await api("/api/projects/" + encodeURIComponent(id) + "/git/tree?ref=" + encodeURIComponent(branch));
+      paint(id, state, tree);
     }
 
-    function paint(id, state) {
+    function paint(id, state, tree) {
       app.replaceChildren();
       const project = state.project || currentProject;
       currentProject = project;
@@ -376,10 +380,11 @@ export function boardHtml(): string {
       const layout = el("div", "layout");
       const side = el("aside", "stack");
       side.append(claimForm(id, banner));
-      side.append(branchList(state.refs));
+      side.append(branchList(id, state.refs, tree && tree.ref));
       side.append(whySearch(id));
       side.append(activityList(state.activity));
       const main = el("div", "stack");
+      main.append(fileBrowser(tree));
       main.append(toolbar(id, banner));
       const arena = renderArena(state.intents);
       if (arena) main.append(arena);
@@ -390,14 +395,45 @@ export function boardHtml(): string {
       app.append(layout);
     }
 
-    function branchList(refs) {
+    function branchList(id, refs, current) {
       const box = el("div", "panel stack");
       box.append(el("h2", "", "Branches"));
       if (!refs || !refs.length) {
         box.append(el("p", "muted", "Push a branch with git to publish it."));
         return box;
       }
-      for (const ref of refs) box.append(el("p", "meta", ref.name.replace(/^refs\\/heads\\//, "")));
+      for (const ref of refs) {
+        const label = ref.name.replace(/^refs\\/heads\\//, "");
+        const button = el("button", "btn" + (ref.name === current ? " primary" : ""), label);
+        button.addEventListener("click", () => renderBoard(id, ref.name));
+        box.append(button);
+      }
+      return box;
+    }
+
+    function fileBrowser(tree) {
+      const box = el("section", "panel stack");
+      const name = String((tree && tree.ref) || "refs/heads/main").replace(/^refs\\/heads\\//, "");
+      box.append(el("h2", "", name));
+      box.append(el("p", "meta", (tree && tree.message) || "No commits yet"));
+      const files = (tree && tree.files) || [];
+      if (!files.length) {
+        box.append(el("p", "muted", "This branch has no files."));
+        return box;
+      }
+      const view = el("pre", "code");
+      const list = el("div", "row");
+      for (const file of files) {
+        const button = el("button", "btn", file.path);
+        button.addEventListener("click", () => {
+          view.textContent = file.path + "\\n\\n" + file.content;
+        });
+        list.append(button);
+      }
+      view.textContent = files[0].path + "\\n\\n" + files[0].content;
+      box.append(list, view);
+      const history = ((tree && tree.history) || []).slice().reverse();
+      for (const commit of history) box.append(el("p", "meta", commit.message + " · " + commit.author));
       return box;
     }
 

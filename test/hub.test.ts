@@ -23,5 +23,10 @@ test("checks fail a goal that flips the canon default and an empty diff", () => 
   const checks = checksFor("Turn newCheckout on", "");
   assert.equal(checks.find((check) => check.name === "canon default stays off")?.status, "fail");
   assert.equal(checks.find((check) => check.name === "diff is present")?.status, "fail");
+  assert.equal(checks.find((check) => check.name === "patch is clean")?.status, "pass");
+  const flipped = checksFor("Keep the default", "diff --git a/src/flags.ts b/src/flags.ts\n+newCheckout = true\n");
+  assert.equal(flipped.find((check) => check.name === "canon default stays off")?.status, "fail");
+  const conflicted = checksFor("Keep the default", "<<<<<<< HEAD\n");
+  assert.equal(conflicted.find((check) => check.name === "patch is clean")?.status, "fail");
   assert.equal(nextNumber([{ number: 2 }, { number: 7 }]), 8);
 });

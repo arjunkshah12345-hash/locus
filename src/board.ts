@@ -17,7 +17,7 @@ import {
   type StoredUser,
 } from "./accounts.ts";
 import { addComment, checksFor, nextNumber, pathsFromDiff, type Issue, type PullRequest } from "./hub.ts";
-import { cleanFiles, fastImport, refName, type GitFile, type GitRef } from "./git.ts";
+import { applyDiff, cleanFiles, fastImport, readmeFiles, refName, type GitFile, type GitRef } from "./git.ts";
 
 export interface Env {
   BOARD: DurableObjectNamespace;
@@ -142,14 +142,44 @@ export class LeaseBoard implements DurableObject {
   private async rememberRef(owner: PublicUser, head: string, message: string, files: GitFile[]): Promise<void> {
     const clean = cleanFiles(files);
     if (!clean.length) return;
+    const name = refName(head);
+    const previous = (await this.refs()).find((ref) => ref.name === name);
+    const at = Date.now();
+    const text = message || "Update";
     await this.saveRef({
-      name: refName(head),
-      message: message || "Update",
+      name,
+      message: text,
       author: owner.name,
       email: owner.email,
-      at: Date.now(),
+      at,
       files: clean,
+      history: [...(previous?.history ?? []), { message: text, author: owner.name, at }].slice(-30),
     });
+  }
+
+  private async ensureCanon(): Promise<void> {
+    if ((await this.refs()).some((ref) => ref.name === "refs/heads/main")) return;
+    const project = (await this.projects()).find((item) => item.id === this.projectId);
+    if (!project) return;
+    await this.saveRef({
+      name: "refs/heads/main",
+      message: "Initial commit",
+      author: "Locus",
+      email: "locus@locus.dev",
+      at: project.createdAt,
+      files: readmeFiles(project.name, project.summary),
+      history: [{ message: "Initial commit", author: "Locus", at: project.createdAt }],
+    });
+  }
+
+  private describeRefs(refs: GitRef[]) {
+    return refs.map((ref) => ({
+      name: ref.name,
+      message: ref.message,
+      author: ref.author,
+      at: ref.at,
+      history: ref.history ?? [],
+    }));
   }
 
   private async note(text: string): Promise<void> {
@@ -247,6 +277,7 @@ export class LeaseBoard implements DurableObject {
         await this.saveProjects(projects);
         this.projectId = id;
         await this.save(new LeaseStore());
+        await this.ensureCanon();
         await this.note(`Opened ${project.name}.`);
         return json({ project }, 201);
       }
@@ -262,6 +293,7 @@ export class LeaseBoard implements DurableObject {
       }
 
       if (url.pathname === "/state" && request.method === "GET") {
+        await this.ensureCanon();
         const projects = await this.projects();
         const project = projects.find((item) => item.id === this.projectId) ?? null;
         const store = await this.load();
@@ -274,7 +306,7 @@ export class LeaseBoard implements DurableObject {
           brief: store.brief(Date.now()),
           issues: await this.issues(),
           pulls: await this.pulls(),
-          refs: (await this.refs()).map((ref) => ({ name: ref.name, message: ref.message, author: ref.author })),
+          refs: this.describeRefs(await this.refs()),
         });
       }
       if (url.pathname === "/issues" && request.method === "GET") {
@@ -391,16 +423,31 @@ export class LeaseBoard implements DurableObject {
         }));
         return json({ runs });
       }
+      if (url.pathname === "/git/tree" && request.method === "GET") {
+        await this.ensureCanon();
+        const name = refName(url.searchParams.get("ref") || "refs/heads/main");
+        const ref = (await this.refs()).find((item) => item.name === name);
+        if (!ref) return json({ error: "Unknown branch", code: "missing" }, 404);
+        return json({
+          ref: ref.name,
+          message: ref.message,
+          author: ref.author,
+          at: ref.at,
+          history: ref.history ?? [],
+          files: ref.files,
+        });
+      }
       if (url.pathname === "/git/refs" && request.method === "GET") {
         const owner = await this.requireActor(request);
         if (owner instanceof Response) return owner;
-        const refs = await this.refs();
-        return json({ refs: refs.map((ref) => ({ name: ref.name, message: ref.message, author: ref.author })) });
+        await this.ensureCanon();
+        return json({ refs: this.describeRefs(await this.refs()) });
       }
       if (url.pathname === "/git/import" && request.method === "GET") {
         const owner = await this.requireActor(request);
         if (owner instanceof Response) return owner;
         const wanted = url.searchParams.getAll("ref");
+        await this.ensureCanon();
         const refs = await this.refs();
         const selected = wanted.length ? refs.filter((ref) => wanted.includes(ref.name)) : refs;
         return new Response(fastImport(selected), { headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -441,20 +488,28 @@ export class LeaseBoard implements DurableObject {
             if (error instanceof LeaseError) return json({ error: error.message, code: error.code }, 400);
             throw error;
           }
+          const head = (await this.refs()).find((ref) => ref.name === pull.head);
+          await this.ensureCanon();
+          const main = (await this.refs()).find((ref) => ref.name === "refs/heads/main");
+          const at = Date.now();
+          let nextFiles = head?.files;
+          if (!nextFiles) {
+            const applied = applyDiff(main?.files ?? [], pull.patch);
+            if (applied.error) return json({ error: applied.error, code: "apply" }, 400);
+            nextFiles = applied.files;
+          }
           await this.save(store);
           pull.status = "merged";
           await this.savePulls(pulls);
-          const head = (await this.refs()).find((ref) => ref.name === pull.head);
-          if (head) {
-            await this.saveRef({
-              name: "refs/heads/main",
-              message: head.message,
-              author: head.author,
-              email: head.email,
-              at: Date.now(),
-              files: head.files,
-            });
-          }
+          await this.saveRef({
+            name: "refs/heads/main",
+            message: head?.message || pull.title,
+            author: head?.author || owner.name,
+            email: head?.email || owner.email,
+            at,
+            files: nextFiles,
+            history: [...(main?.history ?? []), { message: head?.message || pull.title, author: owner.name, at }].slice(-30),
+          });
           await this.note(`${owner.name} merged pull #${pull.number} into canon.`);
           return json({ pull });
         }
@@ -629,6 +684,23 @@ export class LeaseBoard implements DurableObject {
     if (!paths.length) return json({ error: "A pull request needs at least one path", code: "invalid" }, 400);
     const pulls = await this.pulls();
     const number = nextNumber(pulls);
+    const head = refName(body.head || `refs/heads/pull-${number}`);
+    if (!(await this.refs()).some((ref) => ref.name === head) && patch.trim()) {
+      await this.ensureCanon();
+      const main = (await this.refs()).find((ref) => ref.name === "refs/heads/main");
+      const applied = applyDiff(main?.files ?? [], patch);
+      if (applied.error) return json({ error: applied.error, code: "apply" }, 400);
+      const at = Date.now();
+      await this.saveRef({
+        name: head,
+        message: title,
+        author: owner.name,
+        email: owner.email,
+        at,
+        files: applied.files,
+        history: [{ message: title, author: owner.name, at }],
+      });
+    }
     const goal = body.goal?.trim() || body.body?.trim() || title;
     const claimed = await this.claim(new Request(request.url, {
       method: "POST",
@@ -659,7 +731,7 @@ export class LeaseBoard implements DurableObject {
       status: "open",
       intentId: created.intent.id,
       base: "canon",
-      head: body.head || "refs/heads/main",
+      head,
       commit: body.commit ?? null,
       patch,
       createdAt: Date.now(),

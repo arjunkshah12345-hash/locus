@@ -59,6 +59,19 @@ export function checksFor(goal: string, diff: string): Check[] {
     status: diff.trim() ? "pass" : "fail",
     detail: diff.trim() ? "The push includes a patch." : "Push a diff before this can merge.",
   });
+  const conflicted = diff.includes("<<<<<<<");
+  scored.push({
+    name: "patch is clean",
+    status: conflicted ? "fail" : "pass",
+    detail: conflicted ? "The patch still has conflict markers." : "No conflict markers.",
+  });
+  if (/newCheckout\s*[:=]\s*true/.test(diff)) {
+    const canon = scored.find((check) => check.name === "canon default stays off");
+    if (canon) {
+      canon.status = "fail";
+      canon.detail = "The patch turns newCheckout on.";
+    }
+  }
   return scored;
 }
 
