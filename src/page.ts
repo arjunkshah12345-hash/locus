@@ -90,6 +90,8 @@ export function boardHtml(): string {
       background: #111; color: #f6f6f6; border-radius: 6px; padding: 10px;
     }
     pre.code { background: #fff; color: var(--ink); border: 1px solid var(--line); max-height: 420px; overflow: auto; }
+    .readme { display: grid; gap: 8px; }
+    .readme p, .readme h2 { margin: 0; }
     .crumb { color: var(--muted); margin-bottom: 8px; }
     .crumb button { background: none; border: 0; padding: 0; color: var(--orange-deep); cursor: pointer; }
     .activity { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
@@ -163,13 +165,14 @@ export function boardHtml(): string {
       if (path === "/login") return renderAuth("login");
       if (path === "/signup") return renderAuth("signup");
       if (path === "/app") return renderApp();
-      const repo = path.match(/^\\/p\\/([^/]+)(?:\\/(issues|pulls|actions)(?:\\/(\\d+))?)?$/);
+      const repo = path.match(/^\\/p\\/([^/]+)(?:\\/(issues|pulls|actions|commits)(?:\\/(\\d+))?)?$/);
       if (repo) {
         const id = decodeURIComponent(repo[1]);
         const section = repo[2] || "code";
         if (section === "issues") return repo[3] ? renderIssue(id, repo[3]) : renderIssues(id);
         if (section === "pulls") return repo[3] ? renderPull(id, repo[3]) : renderPulls(id);
         if (section === "actions") return renderActions(id);
+        if (section === "commits") return renderCommits(id, repo[3]);
         return renderBoard(id);
       }
       renderLanding();
@@ -275,7 +278,7 @@ export function boardHtml(): string {
 
     function tabs(id, active) {
       const bar = el("div", "tabs");
-      for (const [key, label] of [["", "Code"], ["/issues", "Issues"], ["/pulls", "Pull requests"], ["/actions", "Actions"]]) {
+      for (const [key, label] of [["", "Code"], ["/commits", "Commits"], ["/issues", "Issues"], ["/pulls", "Pull requests"], ["/actions", "Actions"]]) {
         const button = el("button", "tab" + (active === key ? " on" : ""), label);
         button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + key));
         bar.append(button);
@@ -384,7 +387,7 @@ export function boardHtml(): string {
       side.append(whySearch(id));
       side.append(activityList(state.activity));
       const main = el("div", "stack");
-      main.append(fileBrowser(tree));
+      main.append(fileBrowser(id, tree));
       main.append(toolbar(id, banner));
       const arena = renderArena(state.intents);
       if (arena) main.append(arena);
@@ -411,30 +414,192 @@ export function boardHtml(): string {
       return box;
     }
 
-    function fileBrowser(tree) {
-      const box = el("section", "panel stack");
-      const name = String((tree && tree.ref) || "refs/heads/main").replace(/^refs\\/heads\\//, "");
-      box.append(el("h2", "", name));
-      box.append(el("p", "meta", (tree && tree.message) || "No commits yet"));
-      const files = (tree && tree.files) || [];
-      if (!files.length) {
-        box.append(el("p", "muted", "This branch has no files."));
-        return box;
+    function renderMarkdown(text) {
+      const root = el("div", "readme");
+      let block = null;
+      for (const line of String(text || "").split("\\n")) {
+        if (line.startsWith("\`\`\`")) {
+          if (block) {
+            root.append(block);
+            block = null;
+          } else block = el("pre", "code");
+          continue;
+        }
+        if (block) {
+          block.textContent += (block.textContent ? "\\n" : "") + line;
+          continue;
+        }
+        if (line.startsWith("# ")) root.append(el("h2", "", line.slice(2)));
+        else if (line.startsWith("## ")) root.append(el("h2", "", line.slice(3)));
+        else if (line.startsWith("- ")) root.append(el("p", "", line.slice(2)));
+        else if (line.trim()) root.append(el("p", "", line));
       }
+      if (block) root.append(block);
+      return root;
+    }
+
+    function fileBrowser(id, tree) {
+      const box = el("section", "panel stack");
+      const files = (tree && tree.files) || [];
+      const ref = (tree && tree.ref) || "refs/heads/main";
+      const branch = String(ref).replace(/^refs\\/heads\\//, "");
+      const head = el("div", "row");
+      head.append(el("h2", "", branch));
+      head.append(el("p", "meta", (files.length) + " files"));
+      const history = el("button", "btn", "History");
+      history.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + "/commits"));
+      head.append(history);
+      box.append(head);
+      const clone = el("pre", "terminal");
+      clone.textContent = "git clone locus::" + id;
+      box.append(clone, el("p", "meta", (tree && tree.message) || "No commits yet"));
+      const finder = document.createElement("input");
+      finder.placeholder = "Find a file";
+      box.append(finder);
+      const table = el("div", "list");
       const view = el("pre", "code");
-      const list = el("div", "row");
-      for (const file of files) {
-        const button = el("button", "btn", file.path);
-        button.addEventListener("click", () => {
-          view.textContent = file.path + "\\n\\n" + file.content;
-        });
+      const readme = el("div");
+      const editor = el("form", "panel stack");
+      editor.append(el("h2", "", "Edit this file"));
+      const pathInput = document.createElement("input");
+      pathInput.placeholder = "path/to/file.md";
+      const content = document.createElement("textarea");
+      content.style.minHeight = "180px";
+      const message = document.createElement("input");
+      message.placeholder = "Commit message";
+      const branchName = document.createElement("input");
+      branchName.placeholder = "New branch name";
+      const save = el("button", "btn primary", "Commit to " + branch);
+      save.type = "submit";
+      const propose = el("button", "btn", "Propose a pull request");
+      propose.type = "button";
+      const remove = el("button", "btn", "Delete file");
+      remove.type = "button";
+      const fresh = el("button", "btn", "New file");
+      fresh.type = "button";
+      const actions = el("div", "row");
+      actions.append(save, propose, remove, fresh);
+      editor.append(pathInput, content, message, branchName, actions);
+      let directory = "";
+      let selected = files.find((file) => file.path === "README.md") || files[0] || null;
+      function showFile() {
+        view.textContent = selected ? selected.content : "";
+        pathInput.value = selected ? selected.path : "";
+        content.value = selected ? selected.content : "";
+        readme.replaceChildren();
+        if (selected && (selected.path === "README.md" || selected.path.endsWith("/README.md"))) readme.append(renderMarkdown(selected.content));
+      }
+      function draw() {
+        table.replaceChildren();
+        const prefix = directory ? directory + "/" : "";
+        const query = finder.value.trim().toLowerCase();
+        const names = new Map();
+        for (const file of files) {
+          if (query && !file.path.toLowerCase().includes(query)) continue;
+          if (!file.path.startsWith(prefix)) continue;
+          const rest = file.path.slice(prefix.length);
+          const slash = rest.indexOf("/");
+          const name = slash === -1 ? rest : rest.slice(0, slash);
+          if (!name) continue;
+          if (!names.has(name)) names.set(name, slash !== -1);
+        }
+        if (directory && !query) {
+          const up = el("button", "panel rowline", "..");
+          up.addEventListener("click", () => {
+            const cut = directory.lastIndexOf("/");
+            directory = cut === -1 ? "" : directory.slice(0, cut);
+            draw();
+          });
+          table.append(up);
+        }
+        const entries = [...names.entries()].sort((left, right) => Number(right[1]) - Number(left[1]) || left[0].localeCompare(right[0]));
+        if (!entries.length) table.append(el("p", "muted", "No files in this folder."));
+        for (const [name, isDir] of entries) {
+          const button = el("button", "panel rowline", isDir ? name + "/" : name);
+          button.addEventListener("click", () => {
+            if (isDir) {
+              directory = prefix + name;
+              draw();
+              return;
+            }
+            selected = files.find((file) => file.path === prefix + name) || null;
+            showFile();
+          });
+          table.append(button);
+        }
+      }
+      finder.addEventListener("input", draw);
+      fresh.addEventListener("click", () => {
+        selected = null;
+        pathInput.value = directory ? directory + "/" : "";
+        content.value = "";
+        view.textContent = "";
+        readme.replaceChildren();
+      });
+      async function commit(options) {
+        save.disabled = true;
+        try {
+          const body = await api("/api/projects/" + encodeURIComponent(id) + "/git/commit", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ref: ref,
+              path: pathInput.value,
+              content: content.value,
+              message: message.value,
+              branch: options.branch || "",
+              delete: options.delete || false,
+            }),
+          });
+          if (body.pull) go("/p/" + encodeURIComponent(id) + "/pulls/" + body.pull.number);
+          else renderBoard(id, body.ref || ref);
+        } catch (error) {
+          save.disabled = false;
+          if (/sign in/i.test(error.message)) go("/login?next=" + encodeURIComponent(location.pathname));
+          else alert(error.message);
+        }
+      }
+      editor.addEventListener("submit", (event) => {
+        event.preventDefault();
+        commit({});
+      });
+      propose.addEventListener("click", () => {
+        if (!branchName.value.trim()) {
+          alert("Name the branch for the pull request.");
+          return;
+        }
+        commit({ branch: branchName.value.trim() });
+      });
+      remove.addEventListener("click", () => commit({ delete: true }));
+      box.append(table, view, readme, editor);
+      draw();
+      showFile();
+      return box;
+    }
+
+    async function renderCommits(id, index) {
+      app.replaceChildren();
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      const body = await api("/api/projects/" + encodeURIComponent(id) + "/git/commits?ref=refs/heads/main");
+      repoHead(state.project, id, "/commits");
+      const commits = body.commits || [];
+      const picked = commits.find((commit) => String(commit.index) === String(index)) || commits[commits.length - 1];
+      const list = el("div", "list");
+      if (!commits.length) list.append(el("p", "muted", "No commits on main yet."));
+      for (const commit of commits.slice().reverse()) {
+        const button = el("button", "panel rowline", commit.message);
+        button.append(el("span", "meta", commit.author));
+        button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + "/commits/" + commit.index));
         list.append(button);
       }
-      view.textContent = files[0].path + "\\n\\n" + files[0].content;
-      box.append(list, view);
-      const history = ((tree && tree.history) || []).slice().reverse();
-      for (const commit of history) box.append(el("p", "meta", commit.message + " · " + commit.author));
-      return box;
+      app.append(list);
+      if (picked) {
+        const card = el("article", "panel stack");
+        card.append(el("h2", "", picked.message));
+        card.append(el("p", "meta", picked.author));
+        card.append(el("pre", "", picked.diff || "This commit has no stored diff."));
+        app.append(card);
+      }
     }
 
     function count(intents) {
@@ -682,6 +847,7 @@ export function boardHtml(): string {
       form.append(el("h2", "", "New issue"));
       form.append(field("Title", "title", "Rate limit returns 429"));
       form.append(field("Body", "body", "What should change?", true));
+      form.append(field("Labels", "labels", "bug, help wanted"));
       const submit = el("button", "btn primary", "Open issue");
       submit.type = "submit";
       form.append(submit);
@@ -692,7 +858,7 @@ export function boardHtml(): string {
           const body = await api("/api/projects/" + encodeURIComponent(id) + "/issues", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ title: data.get("title"), body: data.get("body") }),
+            body: JSON.stringify({ title: data.get("title"), body: data.get("body"), labels: data.get("labels") }),
           });
           go("/p/" + encodeURIComponent(id) + "/issues/" + body.issue.number);
         } catch (error) {
@@ -701,15 +867,38 @@ export function boardHtml(): string {
         }
       });
       const list = el("div", "list");
-      for (const issue of state.issues || []) {
-        const button = el("button", "panel rowline");
-        button.append(el("strong", "", "#" + issue.number + "  " + issue.title));
-        button.append(el("span", "meta", issue.status + " · " + issue.author));
-        button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + "/issues/" + issue.number));
-        list.append(button);
+      let showing = "open";
+      const openFilter = el("button", "btn primary", "Open");
+      const closedFilter = el("button", "btn", "Closed");
+      function paintIssues() {
+        list.replaceChildren();
+        const shown = (state.issues || []).filter((issue) => issue.status === showing);
+        if (!shown.length) list.append(el("p", "muted", showing === "open" ? "No open issues." : "No closed issues."));
+        for (const issue of shown) {
+          const button = el("button", "panel rowline");
+          const labels = (issue.labels || []).join(" ");
+          button.append(el("strong", "", "#" + issue.number + "  " + issue.title));
+          button.append(el("span", "meta", issue.author + (labels ? " · " + labels : "")));
+          button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + "/issues/" + issue.number));
+          list.append(button);
+        }
       }
-      if (!(state.issues || []).length) list.append(el("p", "muted", "No issues yet."));
-      app.append(form, list);
+      openFilter.addEventListener("click", () => {
+        showing = "open";
+        openFilter.className = "btn primary";
+        closedFilter.className = "btn";
+        paintIssues();
+      });
+      closedFilter.addEventListener("click", () => {
+        showing = "closed";
+        closedFilter.className = "btn primary";
+        openFilter.className = "btn";
+        paintIssues();
+      });
+      const filters = el("div", "row");
+      filters.append(openFilter, closedFilter);
+      paintIssues();
+      app.append(form, filters, list);
     }
 
     async function renderIssue(id, number) {
@@ -723,7 +912,7 @@ export function boardHtml(): string {
       }
       const card = el("article", "panel stack");
       card.append(el("h2", "", issue.title));
-      card.append(el("p", "meta", "#" + issue.number + " · " + issue.status + " · " + issue.author));
+      card.append(el("p", "meta", "#" + issue.number + " · " + issue.status + " · " + issue.author + ((issue.labels || []).length ? " · " + issue.labels.join(", ") : "")));
       card.append(el("p", "", issue.body || "No description."));
       for (const comment of issue.comments) card.append(el("p", "meta", comment.author + ": " + comment.body));
       const toggle = el("button", "btn", issue.status === "open" ? "Close issue" : "Reopen issue");
@@ -799,7 +988,17 @@ export function boardHtml(): string {
       for (const check of pull.checks || []) {
         card.append(el("p", check.status === "pass" ? "pass" : "fail", check.status.toUpperCase() + "  " + check.name + " — " + check.detail));
       }
-      if (pull.patch) card.append(el("pre", "", pull.patch));
+      let diff = pull.patch || "";
+      try {
+        const compared = await api("/api/projects/" + encodeURIComponent(id) + "/git/compare?base=refs/heads/main&head=" + encodeURIComponent(pull.head));
+        if (compared.diff) diff = compared.diff;
+      } catch (error) {
+        diff = pull.patch || "";
+      }
+      if (diff) {
+        card.append(el("h2", "", "Files changed"));
+        card.append(el("pre", "", diff));
+      }
       for (const comment of pull.comments) card.append(el("p", "meta", comment.author + ": " + comment.body));
       if (pull.status === "open") {
         const merge = el("button", "btn primary", "Merge");

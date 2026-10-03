@@ -43,7 +43,7 @@ git fetch origin
 
 `locus::checkout` is the repository id. The remote helper is `git-remote-locus`. It reads `~/.locus/credentials.json`, which `locus login` writes. The push sends the commit message, the diff, and the text files. Locus opens or updates your pull request and stores the branch so a later `git fetch` or `git clone` can import it.
 
-A new repository starts with `README.md` on `main`. The code tab reads that tree. Merging a pull request applies its patch, or replaces `main` with the pushed branch, and the code tab shows the result.
+A new repository starts with `README.md` on `main`. The code tab is a file browser: open a file, edit it, and commit to the branch or propose a pull request. Commits lists the history and the diff. Merging a pull request updates `main`.
 
 ```bash
 LOCUS_URL=http://127.0.0.1:8787 npm run mcp

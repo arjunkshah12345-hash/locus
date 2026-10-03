@@ -7,6 +7,8 @@ export type GitCommit = {
   message: string;
   author: string;
   at: number;
+  email?: string;
+  files?: GitFile[];
 };
 
 export type GitRef = {
@@ -186,4 +188,103 @@ export function fastImport(refs: GitRef[]): string {
   }
   chunks.push("done\n");
   return chunks.join("");
+}
+
+type Edit = { op: "eq" | "del" | "ins"; line: string };
+
+function edits(before: string[], after: string[]): Edit[] {
+  const n = before.length;
+  const m = after.length;
+  if (n * m > 250_000) {
+    return [
+      ...before.map((line) => ({ op: "del" as const, line })),
+      ...after.map((line) => ({ op: "ins" as const, line })),
+    ];
+  }
+  const scores = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      scores[i][j] = before[i] === after[j] ? scores[i + 1][j + 1] + 1 : Math.max(scores[i + 1][j], scores[i][j + 1]);
+    }
+  }
+  const script: Edit[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (before[i] === after[j]) {
+      script.push({ op: "eq", line: before[i] });
+      i += 1;
+      j += 1;
+    } else if (scores[i + 1][j] >= scores[i][j + 1]) {
+      script.push({ op: "del", line: before[i] });
+      i += 1;
+    } else {
+      script.push({ op: "ins", line: after[j] });
+      j += 1;
+    }
+  }
+  while (i < n) script.push({ op: "del", line: before[i++] });
+  while (j < m) script.push({ op: "ins", line: after[j++] });
+  return script;
+}
+
+function unified(path: string, before: string, after: string, kind: "new" | "delete" | "modify"): string {
+  const older = linesOf(before);
+  const newer = linesOf(after);
+  const script = edits(older, newer);
+  const context = 3;
+  const keep = script.map((edit) => edit.op !== "eq");
+  for (let index = 0; index < script.length; index += 1) {
+    if (!keep[index]) continue;
+    for (let near = Math.max(0, index - context); near <= Math.min(script.length - 1, index + context); near += 1) keep[near] = true;
+  }
+  const oldAt: number[] = [];
+  const newAt: number[] = [];
+  let oldLine = 1;
+  let newLine = 1;
+  for (const edit of script) {
+    oldAt.push(oldLine);
+    newAt.push(newLine);
+    if (edit.op !== "ins") oldLine += 1;
+    if (edit.op !== "del") newLine += 1;
+  }
+  const header = [`diff --git a/${path} b/${path}`];
+  if (kind === "new") header.push("new file mode 100644", "--- /dev/null", `+++ b/${path}`);
+  else if (kind === "delete") header.push("deleted file mode 100644", `--- a/${path}`, "+++ /dev/null");
+  else header.push(`--- a/${path}`, `+++ b/${path}`);
+  const body: string[] = [];
+  let index = 0;
+  while (index < script.length) {
+    if (!keep[index]) {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < script.length && keep[end]) end += 1;
+    const slice = script.slice(index, end);
+    const oldCount = slice.filter((edit) => edit.op !== "ins").length;
+    const newCount = slice.filter((edit) => edit.op !== "del").length;
+    body.push(`@@ -${oldCount === 0 ? 0 : oldAt[index]},${oldCount} +${newCount === 0 ? 0 : newAt[index]},${newCount} @@`);
+    for (const edit of slice) {
+      const prefix = edit.op === "del" ? "-" : edit.op === "ins" ? "+" : " ";
+      body.push(prefix + edit.line);
+    }
+    index = end;
+  }
+  return [...header, ...body].join("\n");
+}
+
+export function diffFiles(before: GitFile[], after: GitFile[]): string {
+  const older = new Map(before.map((file) => [file.path, file.content]));
+  const newer = new Map(after.map((file) => [file.path, file.content]));
+  const parts: string[] = [];
+  for (const path of [...new Set([...older.keys(), ...newer.keys()])].sort()) {
+    const previous = older.get(path);
+    const next = newer.get(path);
+    if (previous === next) continue;
+    if (previous === undefined) parts.push(unified(path, "", next ?? "", "new"));
+    else if (next === undefined) parts.push(unified(path, previous, "", "delete"));
+    else parts.push(unified(path, previous, next, "modify"));
+  }
+  return parts.join("\n");
 }

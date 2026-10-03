@@ -14,6 +14,7 @@ export type Issue = {
   author: string;
   status: "open" | "closed";
   createdAt: number;
+  labels: string[];
   comments: Comment[];
 };
 

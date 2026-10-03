@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyDiff, cleanFiles, fastImport, refName } from "../src/git.ts";
+import { applyDiff, cleanFiles, diffFiles, fastImport, refName } from "../src/git.ts";
 
 test("fast-import writes the file bytes and a commit", () => {
   const stream = fastImport([
@@ -54,6 +54,22 @@ test("a unified diff updates main and rejects a mismatched hunk", () => {
     "+new",
   ].join("\n"));
   assert.match(missed.error ?? "", /does not apply/);
+});
+
+test("a file diff applies back onto the previous tree", () => {
+  const before = [{ path: "README.md", content: "# Hi\n\nold line\nkeep\n" }];
+  const after = [
+    { path: "README.md", content: "# Hi\n\nnew line\nkeep\n" },
+    { path: "src/note.txt", content: "added\n" },
+  ];
+  const diff = diffFiles(before, after);
+  const applied = applyDiff(before, diff);
+  assert.equal(applied.error, null);
+  assert.equal(applied.files.find((file) => file.path === "README.md")?.content, after[0].content);
+  assert.equal(applied.files.find((file) => file.path === "src/note.txt")?.content, "added\n");
+  const removed = applyDiff(after, diffFiles(after, before));
+  assert.equal(removed.files.find((file) => file.path === "src/note.txt"), undefined);
+  assert.equal(removed.files.find((file) => file.path === "README.md")?.content, before[0].content);
 });
 
 test("ref names and file paths stay inside the repository", () => {

@@ -17,7 +17,7 @@ import {
   type StoredUser,
 } from "./accounts.ts";
 import { addComment, checksFor, nextNumber, pathsFromDiff, type Issue, type PullRequest } from "./hub.ts";
-import { applyDiff, cleanFiles, fastImport, readmeFiles, refName, type GitFile, type GitRef } from "./git.ts";
+import { applyDiff, cleanFiles, diffFiles, fastImport, readmeFiles, refName, type GitCommit, type GitFile, type GitRef } from "./git.ts";
 
 export interface Env {
   BOARD: DurableObjectNamespace;
@@ -153,7 +153,7 @@ export class LeaseBoard implements DurableObject {
       email: owner.email,
       at,
       files: clean,
-      history: [...(previous?.history ?? []), { message: text, author: owner.name, at }].slice(-30),
+      history: [...(previous?.history ?? []), { message: text, author: owner.name, email: owner.email, at, files: clean }].slice(-30),
     });
   }
 
@@ -168,7 +168,31 @@ export class LeaseBoard implements DurableObject {
       email: "locus@locus.dev",
       at: project.createdAt,
       files: readmeFiles(project.name, project.summary),
-      history: [{ message: "Initial commit", author: "Locus", at: project.createdAt }],
+      history: [{
+        message: "Initial commit",
+        author: "Locus",
+        email: "locus@locus.dev",
+        at: project.createdAt,
+        files: readmeFiles(project.name, project.summary),
+      }],
+    });
+  }
+
+  private commitLog(history: GitCommit[]) {
+    return history.map(({ message, author, at }) => ({ message, author, at }));
+  }
+
+  private async writeCommit(owner: PublicUser, name: string, message: string, files: GitFile[], parent: GitCommit[]): Promise<void> {
+    const clean = cleanFiles(files);
+    const at = Date.now();
+    await this.saveRef({
+      name,
+      message,
+      author: owner.name,
+      email: owner.email,
+      at,
+      files: clean,
+      history: [...parent, { message, author: owner.name, email: owner.email, at, files: clean }].slice(-30),
     });
   }
 
@@ -178,7 +202,7 @@ export class LeaseBoard implements DurableObject {
       message: ref.message,
       author: ref.author,
       at: ref.at,
-      history: ref.history ?? [],
+      history: this.commitLog(ref.history ?? []),
     }));
   }
 
@@ -315,9 +339,10 @@ export class LeaseBoard implements DurableObject {
       if (url.pathname === "/issues" && request.method === "POST") {
         const owner = await this.requireActor(request);
         if (owner instanceof Response) return owner;
-        const body = (await request.json()) as { title?: string; body?: string };
+        const body = (await request.json()) as { title?: string; body?: string; labels?: string[] | string };
         if (!body.title?.trim()) return json({ error: "title is required", code: "invalid" }, 400);
         const issues = await this.issues();
+        const rawLabels = Array.isArray(body.labels) ? body.labels : String(body.labels ?? "").split(",");
         const issue: Issue = {
           number: nextNumber(issues),
           title: body.title.trim(),
@@ -325,6 +350,7 @@ export class LeaseBoard implements DurableObject {
           author: owner.name,
           status: "open",
           createdAt: Date.now(),
+          labels: rawLabels.map((label) => label.trim()).filter(Boolean).slice(0, 5),
           comments: [],
         };
         issues.unshift(issue);
@@ -423,6 +449,85 @@ export class LeaseBoard implements DurableObject {
         }));
         return json({ runs });
       }
+      if (url.pathname === "/git/commit" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        const body = (await request.json()) as {
+          ref?: string;
+          branch?: string;
+          message?: string;
+          path?: string;
+          content?: string;
+          delete?: boolean;
+        };
+        await this.ensureCanon();
+        const sourceName = refName(body.ref || "refs/heads/main");
+        const source = (await this.refs()).find((ref) => ref.name === sourceName);
+        if (!source) return json({ error: "Unknown branch", code: "missing" }, 404);
+        const path = (body.path || "").replaceAll("\\", "/").replace(/^\/+/, "");
+        if (!path || path.split("/").includes("..")) return json({ error: "path is invalid", code: "invalid" }, 400);
+        const files = source.files.map((file) => ({ path: file.path, content: file.content }));
+        const index = files.findIndex((file) => file.path === path);
+        if (body.delete) {
+          if (index < 0) return json({ error: "That file is not on this branch", code: "missing" }, 404);
+          files.splice(index, 1);
+        } else if (typeof body.content !== "string") {
+          return json({ error: "content is required", code: "invalid" }, 400);
+        } else if (index >= 0) files[index] = { path, content: body.content };
+        else files.push({ path, content: body.content });
+        const targetName = body.branch?.trim() ? refName(body.branch) : sourceName;
+        const original = source.files;
+        const changed = diffFiles(original, files);
+        if (!changed.trim()) return json({ error: "Nothing changed", code: "invalid" }, 400);
+        const message = body.message?.trim() || (body.delete ? `Delete ${path}` : `Update ${path}`);
+        const target = (await this.refs()).find((ref) => ref.name === targetName);
+        const parent = target?.history ?? (targetName === sourceName ? source.history ?? [] : source.history ?? []);
+        await this.writeCommit(owner, targetName, message, files, parent);
+        if (!body.branch?.trim()) return json({ ref: targetName });
+        const pulls = await this.pulls();
+        const existing = pulls.find((pull) => pull.status === "open" && pull.head === targetName && pull.author === owner.name);
+        if (existing) {
+          existing.patch = changed;
+          existing.checks = checksFor(existing.body || existing.title, changed);
+          await this.savePulls(pulls);
+          return json({ ref: targetName, pull: existing });
+        }
+        return this.openPull(request, owner, {
+          title: message,
+          body: message,
+          goal: message,
+          patch: changed,
+          paths: pathsFromDiff(changed),
+          head: targetName,
+        });
+      }
+      if (url.pathname === "/git/compare" && request.method === "GET") {
+        await this.ensureCanon();
+        const baseName = refName(url.searchParams.get("base") || "refs/heads/main");
+        const headName = refName(url.searchParams.get("head") || "refs/heads/main");
+        const refs = await this.refs();
+        const base = refs.find((ref) => ref.name === baseName);
+        const head = refs.find((ref) => ref.name === headName);
+        if (!base || !head) return json({ error: "Unknown branch", code: "missing" }, 404);
+        return json({ base: base.name, head: head.name, diff: diffFiles(base.files, head.files) });
+      }
+      if (url.pathname === "/git/commits" && request.method === "GET") {
+        await this.ensureCanon();
+        const name = refName(url.searchParams.get("ref") || "refs/heads/main");
+        const ref = (await this.refs()).find((item) => item.name === name);
+        if (!ref) return json({ error: "Unknown branch", code: "missing" }, 404);
+        const history = ref.history ?? [];
+        return json({
+          ref: ref.name,
+          commits: history.map((commit, index) => ({
+            index,
+            message: commit.message,
+            author: commit.author,
+            at: commit.at,
+            diff: diffFiles(index === 0 ? [] : history[index - 1]?.files ?? [], commit.files ?? []),
+          })),
+        });
+      }
       if (url.pathname === "/git/tree" && request.method === "GET") {
         await this.ensureCanon();
         const name = refName(url.searchParams.get("ref") || "refs/heads/main");
@@ -433,7 +538,7 @@ export class LeaseBoard implements DurableObject {
           message: ref.message,
           author: ref.author,
           at: ref.at,
-          history: ref.history ?? [],
+          history: this.commitLog(ref.history ?? []),
           files: ref.files,
         });
       }
