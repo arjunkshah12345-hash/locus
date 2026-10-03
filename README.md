@@ -71,18 +71,27 @@ The Worker uses a Durable Object lease board, the `locus-artifact-events` queue,
 
 ## Artifacts
 
-Wrangler 4.145 or newer. Add this binding when the account can create Artifacts repos:
+Artifacts is Workers Paid only. On this account the binding deploy returns `10403` until the plan is upgraded, so a claim records a memory fork. After the upgrade, add:
 
 ```jsonc
-"artifacts": [{ "binding": "ARTIFACTS", "namespace": "locus" }]
+"artifacts": [{ "binding": "ARTIFACTS", "namespace": "locus" }],
+"vars": { "CANON_REPO": "canon" }
 ```
 
-Set `CANON_REPO`. A claim then calls `get`, `info`, `readFile` for `AGENTS.md`, `fork`, and `createToken("write")` if the fork result has no token. Push events on the queue update the matching intent and start `RefereeWorkflow`. To subscribe the account, set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and `LOCUS_QUEUE_ID`, then run `npm run subscribe`.
+A claim then calls `get`, `info`, `readFile` for `AGENTS.md`, `fork`, and `createToken("write")` if the fork result has no token. The board does not store the token. Push events on `locus-artifact-events` update the matching intent and start `RefereeWorkflow`.
 
 ## Submit
 
-https://www.cloudflare.com/git-competition/submit/
+Form, once, by hand: https://www.cloudflare.com/git-competition/submit/
 
-Team name: **Locus**. Source: https://github.com/arjunkshah12345-hash/locus. License: Apache-2.0. One submission, sent by hand, with a 5–10 minute video.
+| Field | Value |
+| --- | --- |
+| Team | Locus |
+| Live app | https://locus.arjunkshah21.workers.dev |
+| Source | https://github.com/arjunkshah12345-hash/locus |
+| License | Apache-2.0 |
+| Run | Open the live app, open **Storefront flags**, choose **Watch it arrive**, then **Resolve arena**. Locally: `npm install && npm test && npm run dev` |
+
+The form also wants a 5–10 minute video. Record the live board: the swarm arriving, the three diffs on `src/flags.ts`, the synthesis that keeps `newCheckout` off, then Ask why on that file.
 
 License: Apache-2.0.
