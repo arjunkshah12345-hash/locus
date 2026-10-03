@@ -12,7 +12,7 @@ npm test
 npm run dev
 ```
 
-Open the URL Wrangler prints. `npm run demo` prints the same flag-service story with no Cloudflare account.
+The live app is https://locus.arjunkshah21.workers.dev. `npm run demo` prints the same flag-service story with no Cloudflare account.
 
 ## What you can do
 
@@ -59,6 +59,8 @@ A claim body:
 The claim response may include a Git token once. The board does not store it.
 
 ## Deploy
+
+Live: https://locus.arjunkshah21.workers.dev
 
 ```bash
 npx wrangler login
