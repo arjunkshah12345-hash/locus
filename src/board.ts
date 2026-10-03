@@ -4,6 +4,20 @@ import { runDemo } from "./demo-script.ts";
 import { applyReferee } from "./referee.ts";
 import { handleMcp, type McpMessage } from "./mcp.ts";
 import { previewUrlFor, type PushEvent } from "./preview.ts";
+import {
+  clearSessionCookie,
+  hashPassword,
+  normalizeEmail,
+  publicUser,
+  readSession,
+  sessionCookie,
+  sessionToken,
+  verifyPassword,
+  type PublicUser,
+  type StoredUser,
+} from "./accounts.ts";
+import { addComment, checksFor, nextNumber, pathsFromDiff, type Issue, type PullRequest } from "./hub.ts";
+import { cleanFiles, fastImport, refName, type GitFile, type GitRef } from "./git.ts";
 
 export interface Env {
   BOARD: DurableObjectNamespace;
@@ -14,11 +28,10 @@ export interface Env {
   };
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
+function json(body: unknown, status = 200, cookie?: string): Response {
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  if (cookie) headers.set("set-cookie", cookie);
+  return new Response(JSON.stringify(body), { status, headers });
 }
 
 type Project = {
@@ -70,6 +83,75 @@ export class LeaseBoard implements DurableObject {
     return (await this.state.storage.get<Activity[]>(`activity:${this.projectId}`)) ?? [];
   }
 
+  private secure(request: Request): boolean {
+    return new URL(request.url).protocol === "https:";
+  }
+
+  private async users(): Promise<StoredUser[]> {
+    return (await this.state.storage.get<StoredUser[]>("users")) ?? [];
+  }
+
+  private async sessions(): Promise<Record<string, { userId: string; expires: number }>> {
+    return (await this.state.storage.get<Record<string, { userId: string; expires: number }>>("sessions")) ?? {};
+  }
+
+  private async actor(request: Request): Promise<PublicUser | null> {
+    const token = readSession(request);
+    if (!token) return null;
+    const sessions = await this.sessions();
+    const session = sessions[token];
+    if (!session || session.expires < Date.now()) return null;
+    const user = (await this.users()).find((item) => item.id === session.userId);
+    return user ? publicUser(user) : null;
+  }
+
+  private async requireActor(request: Request): Promise<PublicUser | Response> {
+    const user = await this.actor(request);
+    if (!user) return json({ error: "Sign in required", code: "unauthorized" }, 401);
+    return user;
+  }
+
+  private async issues(): Promise<Issue[]> {
+    return (await this.state.storage.get<Issue[]>(`issues:${this.projectId}`)) ?? [];
+  }
+
+  private async saveIssues(issues: Issue[]): Promise<void> {
+    await this.state.storage.put(`issues:${this.projectId}`, issues);
+  }
+
+  private async pulls(): Promise<PullRequest[]> {
+    return (await this.state.storage.get<PullRequest[]>(`pulls:${this.projectId}`)) ?? [];
+  }
+
+  private async savePulls(pulls: PullRequest[]): Promise<void> {
+    await this.state.storage.put(`pulls:${this.projectId}`, pulls);
+  }
+
+  private async refs(): Promise<GitRef[]> {
+    return (await this.state.storage.get<GitRef[]>(`gitrefs:${this.projectId}`)) ?? [];
+  }
+
+  private async saveRef(next: GitRef): Promise<void> {
+    const refs = await this.refs();
+    const index = refs.findIndex((item) => item.name === next.name);
+    if (index >= 0) refs[index] = next;
+    else refs.unshift(next);
+    await this.state.storage.put(`gitrefs:${this.projectId}`, refs);
+  }
+
+  private async rememberRef(owner: PublicUser, head: string, message: string, files: GitFile[]): Promise<void> {
+    const clean = cleanFiles(files);
+    if (!clean.length) return;
+    await this.saveRef({
+      name: refName(head),
+      message: message || "Update",
+      author: owner.name,
+      email: owner.email,
+      at: Date.now(),
+      files: clean,
+    });
+  }
+
   private async note(text: string): Promise<void> {
     const items = await this.activity();
     items.unshift({ at: Date.now(), text });
@@ -79,6 +161,60 @@ export class LeaseBoard implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
+      if (url.pathname === "/auth/me" && request.method === "GET") {
+        return json({ user: await this.actor(request) });
+      }
+      if (url.pathname === "/auth/signup" && request.method === "POST") {
+        const body = (await request.json()) as { name?: string; email?: string; password?: string };
+        const name = body.name?.trim() ?? "";
+        const email = normalizeEmail(body.email ?? "");
+        const password = body.password ?? "";
+        if (name.length < 2 || !email.includes("@") || password.length < 8) {
+          return json({ error: "Name, email, and a password of 8 or more characters are required", code: "invalid" }, 400);
+        }
+        const users = await this.users();
+        if (users.some((user) => user.email === email)) {
+          return json({ error: "An account already uses that email", code: "exists" }, 400);
+        }
+        const secret = await hashPassword(password);
+        const user: StoredUser = {
+          id: crypto.randomUUID(),
+          email,
+          name,
+          salt: secret.salt,
+          hash: secret.hash,
+          createdAt: Date.now(),
+        };
+        users.push(user);
+        await this.state.storage.put("users", users);
+        const token = sessionToken();
+        const sessions = await this.sessions();
+        sessions[token] = { userId: user.id, expires: Date.now() + 30 * 24 * 60 * 60 * 1000 };
+        await this.state.storage.put("sessions", sessions);
+        return json({ user: publicUser(user), token }, 201, sessionCookie(token, this.secure(request)));
+      }
+      if (url.pathname === "/auth/login" && request.method === "POST") {
+        const body = (await request.json()) as { email?: string; password?: string };
+        const email = normalizeEmail(body.email ?? "");
+        const user = (await this.users()).find((item) => item.email === email);
+        if (!user || !(await verifyPassword(body.password ?? "", user.salt, user.hash))) {
+          return json({ error: "Email or password is wrong", code: "unauthorized" }, 401);
+        }
+        const token = sessionToken();
+        const sessions = await this.sessions();
+        sessions[token] = { userId: user.id, expires: Date.now() + 30 * 24 * 60 * 60 * 1000 };
+        await this.state.storage.put("sessions", sessions);
+        return json({ user: publicUser(user), token }, 200, sessionCookie(token, this.secure(request)));
+      }
+      if (url.pathname === "/auth/logout" && request.method === "POST") {
+        const token = readSession(request);
+        if (token) {
+          const sessions = await this.sessions();
+          delete sessions[token];
+          await this.state.storage.put("sessions", sessions);
+        }
+        return json({ ok: true }, 200, clearSessionCookie(this.secure(request)));
+      }
       if (url.pathname === "/projects" && request.method === "GET") {
         const projects = await this.projects();
         const listed = [];
@@ -94,6 +230,8 @@ export class LeaseBoard implements DurableObject {
         return json({ projects: listed });
       }
       if (url.pathname === "/projects" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
         const body = (await request.json()) as { name?: string; summary?: string };
         if (!body.name?.trim()) return json({ error: "name is required", code: "invalid" }, 400);
         const projects = await this.projects();
@@ -129,7 +267,197 @@ export class LeaseBoard implements DurableObject {
         const store = await this.load();
         const intents = store.list(Date.now());
         await this.save(store);
-        return json({ project, intents, activity: await this.activity(), brief: store.brief(Date.now()) });
+        return json({
+          project,
+          intents,
+          activity: await this.activity(),
+          brief: store.brief(Date.now()),
+          issues: await this.issues(),
+          pulls: await this.pulls(),
+          refs: (await this.refs()).map((ref) => ({ name: ref.name, message: ref.message, author: ref.author })),
+        });
+      }
+      if (url.pathname === "/issues" && request.method === "GET") {
+        return json({ issues: await this.issues() });
+      }
+      if (url.pathname === "/issues" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        const body = (await request.json()) as { title?: string; body?: string };
+        if (!body.title?.trim()) return json({ error: "title is required", code: "invalid" }, 400);
+        const issues = await this.issues();
+        const issue: Issue = {
+          number: nextNumber(issues),
+          title: body.title.trim(),
+          body: body.body?.trim() || "",
+          author: owner.name,
+          status: "open",
+          createdAt: Date.now(),
+          comments: [],
+        };
+        issues.unshift(issue);
+        await this.saveIssues(issues);
+        await this.note(`${owner.name} opened issue #${issue.number}.`);
+        return json({ issue }, 201);
+      }
+      const issueMatch = url.pathname.match(/^\/issues\/(\d+)(?:\/(comments|close|reopen))?$/);
+      if (issueMatch) {
+        const number = Number(issueMatch[1]);
+        const issues = await this.issues();
+        const issue = issues.find((item) => item.number === number);
+        if (!issue) return json({ error: "Unknown issue", code: "missing" }, 404);
+        if (!issueMatch[2] && request.method === "GET") return json({ issue });
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        if (issueMatch[2] === "comments" && request.method === "POST") {
+          const body = (await request.json()) as { body?: string };
+          if (!body.body?.trim()) return json({ error: "body is required", code: "invalid" }, 400);
+          addComment(issue.comments, owner.name, body.body.trim(), Date.now());
+          await this.saveIssues(issues);
+          return json({ issue });
+        }
+        if ((issueMatch[2] === "close" || issueMatch[2] === "reopen") && request.method === "POST") {
+          issue.status = issueMatch[2] === "close" ? "closed" : "open";
+          await this.saveIssues(issues);
+          await this.note(`${owner.name} ${issue.status === "closed" ? "closed" : "reopened"} issue #${issue.number}.`);
+          return json({ issue });
+        }
+      }
+      if (url.pathname === "/pulls" && request.method === "GET") {
+        return json({ pulls: await this.pulls() });
+      }
+      if (url.pathname === "/pulls" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        const body = (await request.json()) as {
+          title?: string;
+          body?: string;
+          goal?: string;
+          patch?: string;
+          paths?: string[];
+          symbols?: string[];
+          head?: string;
+          commit?: string;
+        };
+        return this.openPull(request, owner, body);
+      }
+      if (url.pathname === "/git/push" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        const body = (await request.json()) as {
+          ref?: string;
+          commit?: string;
+          message?: string;
+          diff?: string;
+          files?: GitFile[];
+        };
+        const diff = body.diff ?? "";
+        const paths = pathsFromDiff(diff);
+        const head = refName(body.ref || "refs/heads/main");
+        const files = Array.isArray(body.files) ? body.files : [];
+        await this.rememberRef(owner, head, body.message || "", files);
+        const pulls = await this.pulls();
+        const existing = pulls.find((pull) => pull.status === "open" && pull.author === owner.name && pull.head === head);
+        if (existing) {
+          existing.patch = diff;
+          existing.commit = body.commit ?? existing.commit;
+          existing.checks = checksFor(existing.body || existing.title, diff);
+          const store = await this.load();
+          store.setPatch(existing.intentId, diff);
+          store.setChecks(existing.intentId, existing.checks.map((check) => ({ name: check.name, passed: check.status === "pass", detail: check.detail })));
+          await this.save(store);
+          await this.savePulls(pulls);
+          await this.note(`${owner.name} pushed ${body.commit ?? "a commit"} to #${existing.number}.`);
+          return json({ pull: existing });
+        }
+        return this.openPull(request, owner, {
+          title: body.message || `Push ${head}`,
+          body: body.message || "",
+          goal: body.message || `Land ${paths.join(", ") || "the pushed files"}.`,
+          patch: diff,
+          paths,
+          head,
+          commit: body.commit,
+        });
+      }
+      if (url.pathname === "/actions" && request.method === "GET") {
+        const pulls = await this.pulls();
+        const runs = pulls.map((pull) => ({
+          name: `pull #${pull.number}`,
+          title: pull.title,
+          status: pull.checks.some((check) => check.status === "fail") ? "fail" : "pass",
+          checks: pull.checks,
+          at: pull.createdAt,
+        }));
+        return json({ runs });
+      }
+      if (url.pathname === "/git/refs" && request.method === "GET") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        const refs = await this.refs();
+        return json({ refs: refs.map((ref) => ({ name: ref.name, message: ref.message, author: ref.author })) });
+      }
+      if (url.pathname === "/git/import" && request.method === "GET") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        const wanted = url.searchParams.getAll("ref");
+        const refs = await this.refs();
+        const selected = wanted.length ? refs.filter((ref) => wanted.includes(ref.name)) : refs;
+        return new Response(fastImport(selected), { headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
+      const pullMatch = url.pathname.match(/^\/pulls\/(\d+)(?:\/(comments|merge|close))?$/);
+      if (pullMatch) {
+        const number = Number(pullMatch[1]);
+        const pulls = await this.pulls();
+        const pull = pulls.find((item) => item.number === number);
+        if (!pull) return json({ error: "Unknown pull request", code: "missing" }, 404);
+        if (!pullMatch[2] && request.method === "GET") return json({ pull });
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        if (pullMatch[2] === "comments" && request.method === "POST") {
+          const body = (await request.json()) as { body?: string };
+          if (!body.body?.trim()) return json({ error: "body is required", code: "invalid" }, 400);
+          addComment(pull.comments, owner.name, body.body.trim(), Date.now());
+          await this.savePulls(pulls);
+          return json({ pull });
+        }
+        if (pullMatch[2] === "close" && request.method === "POST") {
+          pull.status = "closed";
+          await this.savePulls(pulls);
+          await this.note(`${owner.name} closed pull #${pull.number}.`);
+          return json({ pull });
+        }
+        if (pullMatch[2] === "merge" && request.method === "POST") {
+          if (pull.status !== "open") return json({ error: "This pull request is already finished", code: "invalid" }, 400);
+          const failed = pull.checks.find((check) => check.status === "fail");
+          if (failed) return json({ error: `${failed.name} failed. ${failed.detail}`, code: "checks" }, 400);
+          const store = await this.load();
+          const intent = store.get(pull.intentId);
+          if (!intent) return json({ error: "The lease for this pull request is gone", code: "missing" }, 404);
+          try {
+            if (intent.contended) store.decide(pull.intentId, Date.now());
+            else store.land(pull.intentId, Date.now());
+          } catch (error) {
+            if (error instanceof LeaseError) return json({ error: error.message, code: error.code }, 400);
+            throw error;
+          }
+          await this.save(store);
+          pull.status = "merged";
+          await this.savePulls(pulls);
+          const head = (await this.refs()).find((ref) => ref.name === pull.head);
+          if (head) {
+            await this.saveRef({
+              name: "refs/heads/main",
+              message: head.message,
+              author: head.author,
+              email: head.email,
+              at: Date.now(),
+              files: head.files,
+            });
+          }
+          await this.note(`${owner.name} merged pull #${pull.number} into canon.`);
+          return json({ pull });
+        }
       }
       if (url.pathname === "/intents" && request.method === "GET") {
         const store = await this.load();
@@ -138,6 +466,8 @@ export class LeaseBoard implements DurableObject {
         return json({ intents });
       }
       if (url.pathname === "/intents" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
         return await this.claim(request);
       }
       if (url.pathname === "/sample" && request.method === "POST") {
@@ -278,7 +608,72 @@ export class LeaseBoard implements DurableObject {
     }
   }
 
+  private async openPull(
+    request: Request,
+    owner: PublicUser,
+    body: {
+      title?: string;
+      body?: string;
+      goal?: string;
+      patch?: string;
+      paths?: string[];
+      symbols?: string[];
+      head?: string;
+      commit?: string;
+    },
+  ): Promise<Response> {
+    const title = body.title?.trim() || "";
+    const patch = body.patch ?? "";
+    const paths = body.paths?.length ? body.paths : pathsFromDiff(patch);
+    if (!title) return json({ error: "title is required", code: "invalid" }, 400);
+    if (!paths.length) return json({ error: "A pull request needs at least one path", code: "invalid" }, 400);
+    const pulls = await this.pulls();
+    const number = nextNumber(pulls);
+    const goal = body.goal?.trim() || body.body?.trim() || title;
+    const claimed = await this.claim(new Request(request.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: `pr-${this.projectId}-${number}`.slice(0, 48),
+        title,
+        goal,
+        agentId: owner.name,
+        surface: { paths, symbols: body.symbols ?? [] },
+      }),
+    }));
+    if (!claimed.ok) return claimed;
+    const created = (await claimed.json()) as { intent: Intent };
+    const checks = checksFor(goal, patch);
+    const store = await this.load();
+    store.setPatch(created.intent.id, patch);
+    store.setChecks(
+      created.intent.id,
+      checks.map((check) => ({ name: check.name, passed: check.status === "pass", detail: check.detail })),
+    );
+    await this.save(store);
+    const pull: PullRequest = {
+      number,
+      title,
+      body: body.body?.trim() || "",
+      author: owner.name,
+      status: "open",
+      intentId: created.intent.id,
+      base: "canon",
+      head: body.head || "refs/heads/main",
+      commit: body.commit ?? null,
+      patch,
+      createdAt: Date.now(),
+      comments: [],
+      checks,
+    };
+    pulls.unshift(pull);
+    await this.savePulls(pulls);
+    await this.note(`${owner.name} opened pull #${pull.number}.`);
+    return json({ pull, intent: store.get(created.intent.id) }, 201);
+  }
+
   private async claim(request: Request): Promise<Response> {
+    const owner = await this.actor(request);
     const body = (await request.json()) as {
       id?: string;
       title?: string;
@@ -286,7 +681,8 @@ export class LeaseBoard implements DurableObject {
       agentId?: string;
       surface?: Surface;
     };
-    if (!body.title || !body.goal || !body.agentId || !body.surface) {
+    const agentId = body.agentId || owner?.name;
+    if (!body.title || !body.goal || !agentId || !body.surface) {
       return json({ error: "title, goal, agentId, and surface are required", code: "invalid" }, 400);
     }
     const store = await this.load();
@@ -295,7 +691,7 @@ export class LeaseBoard implements DurableObject {
         id: body.id ?? crypto.randomUUID(),
         title: body.title,
         goal: body.goal,
-        agentId: body.agentId,
+        agentId,
         surface: {
           paths: body.surface.paths ?? [],
           symbols: body.surface.symbols ?? [],
@@ -328,7 +724,7 @@ export class LeaseBoard implements DurableObject {
 
     await this.save(store);
     const stored = store.snapshot().find((item) => item.id === intent.id);
-    await this.note(`${stored?.agentId ?? body.agentId} claimed ${stored?.surface.paths.join(", ") || "a surface"}.`);
+    await this.note(`${stored?.agentId ?? agentId} claimed ${stored?.surface.paths.join(", ") || "a surface"}.`);
     const brief = store.brief(Date.now());
     return json({ intent: stored ?? intent, overlap, token, agentsMd, brief }, 201);
   }

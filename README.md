@@ -16,10 +16,32 @@ The live app is https://locus.arjunkshah21.workers.dev. `npm run demo` prints th
 
 ## What you can do
 
-- Create a project and claim a surface. A second claim on the same path or symbol opens the arena.
+- Create an account, open a repository, and file an issue or a pull request.
+- Push from a terminal. A push opens a pull request and runs the canon checks. Merge is refused while a check fails.
+- Fetch that branch back. A merge publishes it as `main`.
+- Claim a surface. A second claim on the same path or symbol opens the arena.
 - Land a free intent, hold the lease, mark it ready, or add context for the next agent.
 - Ask why a file looks the way it does. The answer is the landed capsule.
 - Point an agent at `POST /mcp` (`list_active`, `claim`, `heartbeat`, `append_context`, `mark_ready`, `ask_why`).
+
+## Account, issues, and git
+
+```bash
+node bin/locus.mjs signup --url http://127.0.0.1:8787 --name Arjun --email you@example.com --password "at-least-8"
+node bin/locus.mjs repos
+node bin/locus.mjs issue checkout "Rate limit returns 429" "The flag API should answer 429."
+```
+
+From a git checkout, with Locus `bin` on `PATH`:
+
+```bash
+export PATH="/path/to/locus/bin:$PATH"
+git remote add origin locus::checkout
+git push origin HEAD:refs/heads/feature
+git fetch origin
+```
+
+`locus::checkout` is the repository id. The remote helper is `git-remote-locus`. It reads `~/.locus/credentials.json`, which `locus login` writes. The push sends the commit message, the diff, and the text files. Locus opens or updates your pull request and stores the branch so a later `git fetch` can import it.
 
 ```bash
 LOCUS_URL=http://127.0.0.1:8787 npm run mcp

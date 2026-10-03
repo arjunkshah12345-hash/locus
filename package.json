@@ -2,6 +2,10 @@
   "name": "locus",
   "private": true,
   "type": "module",
+  "bin": {
+    "locus": "./bin/locus.mjs",
+    "git-remote-locus": "./bin/git-remote-locus"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "check": "tsc --noEmit",

@@ -47,7 +47,13 @@ export default {
       next.pathname = url.pathname.slice("/api".length) || "/";
       return board(env).fetch(new Request(next, request));
     }
-    if (url.pathname === "/" || url.pathname.startsWith("/p/")) {
+    if (
+      url.pathname === "/" ||
+      url.pathname === "/login" ||
+      url.pathname === "/signup" ||
+      url.pathname === "/app" ||
+      url.pathname.startsWith("/p/")
+    ) {
       return new Response(boardHtml(), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });

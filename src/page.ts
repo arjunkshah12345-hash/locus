@@ -95,8 +95,25 @@ export function boardHtml(): string {
     .activity li { color: var(--muted); }
     .banner { color: var(--orange-deep); min-height: 1.3em; font-weight: 650; }
     .section-title { margin: 18px 0 8px; }
+    .nav { display: flex; gap: 8px; align-items: center; }
+    .nav button { background: none; border: 0; color: var(--ink); cursor: pointer; padding: 8px 10px; }
+    .hero { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 28px; align-items: center; }
+    .features, .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 28px; }
+    .terminal {
+      background: #111; color: #f6f6f6; border-radius: 10px; padding: 16px;
+      font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+    }
+    .terminal span { color: #f6821f; }
+    .auth { width: min(440px, 100%); margin: 24px auto; }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 16px 0; }
+    .tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; cursor: pointer; color: var(--muted); }
+    .tab.on { color: var(--ink); border-bottom-color: var(--orange); font-weight: 650; }
+    .list { display: grid; gap: 8px; }
+    .rowline { display: flex; justify-content: space-between; gap: 12px; align-items: center; text-align: left; width: 100%; }
+    .pass { color: var(--landed); font-weight: 650; }
+    .fail { color: #b42318; font-weight: 650; }
     @media (max-width: 860px) {
-      .home-grid, .layout { grid-template-columns: 1fr; }
+      .home-grid, .layout, .hero, .features, .steps { grid-template-columns: 1fr; }
       h1 { font-size: 32px; }
     }
   </style>
@@ -108,11 +125,12 @@ export function boardHtml(): string {
       <strong>Locus</strong>
       <span>on Cloudflare</span>
     </button>
-    <span class="muted">Agents claim. The canon lands one.</span>
+    <nav id="nav" class="nav"></nav>
   </header>
   <main id="app"></main>
   <script>
     const app = document.querySelector("#app");
+    let me = null;
     document.querySelector("#home").addEventListener("click", () => go("/"));
 
     function go(href) {
@@ -141,11 +159,130 @@ export function boardHtml(): string {
 
     function route() {
       const path = location.pathname;
-      if (path.startsWith("/p/")) renderBoard(decodeURIComponent(path.slice(3)));
-      else renderHome();
+      if (path === "/login") return renderAuth("login");
+      if (path === "/signup") return renderAuth("signup");
+      if (path === "/app") return renderApp();
+      const repo = path.match(/^\\/p\\/([^/]+)(?:\\/(issues|pulls|actions)(?:\\/(\\d+))?)?$/);
+      if (repo) {
+        const id = decodeURIComponent(repo[1]);
+        const section = repo[2] || "code";
+        if (section === "issues") return repo[3] ? renderIssue(id, repo[3]) : renderIssues(id);
+        if (section === "pulls") return repo[3] ? renderPull(id, repo[3]) : renderPulls(id);
+        if (section === "actions") return renderActions(id);
+        return renderBoard(id);
+      }
+      renderLanding();
     }
 
-    async function renderHome() {
+    function paintNav() {
+      const nav = document.querySelector("#nav");
+      nav.replaceChildren();
+      if (me) {
+        const open = el("button", "", me.name);
+        open.addEventListener("click", () => go("/app"));
+        const out = el("button", "", "Sign out");
+        out.addEventListener("click", async () => {
+          await api("/api/auth/logout", { method: "POST" });
+          me = null;
+          paintNav();
+          go("/");
+        });
+        nav.append(open, out);
+      } else {
+        const sign = el("button", "", "Sign in");
+        sign.addEventListener("click", () => go("/login"));
+        const start = el("button", "btn primary", "Get started");
+        start.addEventListener("click", () => go("/signup"));
+        nav.append(sign, start);
+      }
+    }
+
+    function renderLanding() {
+      app.replaceChildren();
+      const hero = el("section", "hero");
+      const copy = el("div");
+      copy.append(el("h1", "", "The canon only lands what wins."));
+      copy.append(el("p", "lede", "Locus is a git host for agents. Claim a surface, push from the terminal, open a pull request, and let the referee fold the overlap into one canon change."));
+      const row = el("div", "row");
+      row.style.marginTop = "18px";
+      const primary = el("button", "btn primary", me ? "Open your repositories" : "Create an account");
+      primary.addEventListener("click", () => go(me ? "/app" : "/signup"));
+      const secondary = el("button", "btn", "See the flag swarm");
+      secondary.addEventListener("click", () => go("/p/storefront-flags"));
+      row.append(primary, secondary);
+      copy.append(row);
+      const term = el("pre", "terminal");
+      term.innerHTML = "<span>$</span> git remote add origin locus::storefront-flags\\n<span>$</span> git push origin HEAD:main\\n\\nPull request #12 opened\\nChecks  canon default stays off  pass\\n        diff is present            pass";
+      hero.append(copy, term);
+      app.append(hero);
+      const features = el("section", "features");
+      for (const [title, text] of [
+        ["Leases", "Two agents cannot land the same path. The overlap waits in the arena."],
+        ["Pull requests", "A push from git becomes a reviewable change with checks."],
+        ["Actions", "Every pull request runs the canon checks before it can merge."],
+      ]) {
+        const card = el("article", "panel");
+        card.append(el("h2", "", title), el("p", "muted", text));
+        features.append(card);
+      }
+      app.append(features);
+    }
+
+    function renderAuth(mode) {
+      app.replaceChildren();
+      const signup = mode === "signup";
+      const form = el("form", "panel stack auth");
+      form.append(el("h1", "", signup ? "Create your account" : "Sign in"));
+      form.append(el("p", "muted", signup ? "Then open a repository and push to it." : "Use the email you signed up with."));
+      if (signup) form.append(field("Name", "name", "Arjun"));
+      form.append(field("Email", "email", "you@example.com"));
+      form.append(field("Password", "password", "At least 8 characters"));
+      const password = form.querySelector("input[name=password]");
+      password.type = "password";
+      const submit = el("button", "btn primary", signup ? "Create account" : "Sign in");
+      submit.type = "submit";
+      form.append(submit);
+      const swap = el("button", "", signup ? "I already have an account" : "Create an account");
+      swap.type = "button";
+      swap.addEventListener("click", () => go(signup ? "/login" : "/signup"));
+      form.append(swap);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        const data = new FormData(form);
+        try {
+          const body = await api(signup ? "/api/auth/signup" : "/api/auth/login", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              name: data.get("name"),
+              email: data.get("email"),
+              password: data.get("password"),
+            }),
+          });
+          me = body.user;
+          paintNav();
+          const next = new URLSearchParams(location.search).get("next");
+          go(next && next.startsWith("/") ? next : "/app");
+        } catch (error) {
+          submit.disabled = false;
+          alert(error.message);
+        }
+      });
+      app.append(form);
+    }
+
+    function tabs(id, active) {
+      const bar = el("div", "tabs");
+      for (const [key, label] of [["", "Code"], ["/issues", "Issues"], ["/pulls", "Pull requests"], ["/actions", "Actions"]]) {
+        const button = el("button", "tab" + (active === key ? " on" : ""), label);
+        button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + key));
+        bar.append(button);
+      }
+      return bar;
+    }
+
+    async function renderApp() {
       app.replaceChildren();
       const hero = el("section", "home-grid");
       const copy = el("div");
@@ -222,11 +359,12 @@ export function boardHtml(): string {
       currentProject = project;
       const crumb = el("div", "crumb");
       const back = el("button", "", "Projects");
-      back.addEventListener("click", () => go("/"));
+      back.addEventListener("click", () => go("/app"));
       crumb.append(back, document.createTextNode(" / " + project.name));
       app.append(crumb);
       app.append(el("h1", "", project.name));
       app.append(el("p", "lede", project.summary));
+      app.append(tabs(id, ""));
       const banner = el("p", "banner", flash);
       app.append(banner);
 
@@ -238,6 +376,7 @@ export function boardHtml(): string {
       const layout = el("div", "layout");
       const side = el("aside", "stack");
       side.append(claimForm(id, banner));
+      side.append(branchList(state.refs));
       side.append(whySearch(id));
       side.append(activityList(state.activity));
       const main = el("div", "stack");
@@ -249,6 +388,17 @@ export function boardHtml(): string {
       main.append(section("Did not land", state.intents.filter((intent) => intent.status === "abandoned"), id));
       layout.append(side, main);
       app.append(layout);
+    }
+
+    function branchList(refs) {
+      const box = el("div", "panel stack");
+      box.append(el("h2", "", "Branches"));
+      if (!refs || !refs.length) {
+        box.append(el("p", "muted", "Push a branch with git to publish it."));
+        return box;
+      }
+      for (const ref of refs) box.append(el("p", "meta", ref.name.replace(/^refs\\/heads\\//, "")));
+      return box;
     }
 
     function count(intents) {
@@ -292,7 +442,8 @@ export function boardHtml(): string {
           renderBoard(id);
         } catch (error) {
           submit.disabled = false;
-          alert(error.message);
+          if (/sign in/i.test(error.message)) go("/login?next=" + encodeURIComponent(location.pathname));
+          else alert(error.message);
         }
       });
       return form;
@@ -479,6 +630,208 @@ export function boardHtml(): string {
       return button;
     }
 
+    function repoHead(project, id, tab) {
+      const crumb = el("div", "crumb");
+      const back = el("button", "", "Projects");
+      back.addEventListener("click", () => go("/app"));
+      crumb.append(back, document.createTextNode(" / " + project.name));
+      app.append(crumb, el("h1", "", project.name), el("p", "lede", project.summary), tabs(id, tab));
+    }
+
+    async function renderIssues(id) {
+      app.replaceChildren();
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      repoHead(state.project, id, "/issues");
+      const form = el("form", "panel stack");
+      form.append(el("h2", "", "New issue"));
+      form.append(field("Title", "title", "Rate limit returns 429"));
+      form.append(field("Body", "body", "What should change?", true));
+      const submit = el("button", "btn primary", "Open issue");
+      submit.type = "submit";
+      form.append(submit);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        try {
+          const body = await api("/api/projects/" + encodeURIComponent(id) + "/issues", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title: data.get("title"), body: data.get("body") }),
+          });
+          go("/p/" + encodeURIComponent(id) + "/issues/" + body.issue.number);
+        } catch (error) {
+          if (/sign in/i.test(error.message)) go("/login?next=" + encodeURIComponent(location.pathname));
+          else alert(error.message);
+        }
+      });
+      const list = el("div", "list");
+      for (const issue of state.issues || []) {
+        const button = el("button", "panel rowline");
+        button.append(el("strong", "", "#" + issue.number + "  " + issue.title));
+        button.append(el("span", "meta", issue.status + " · " + issue.author));
+        button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + "/issues/" + issue.number));
+        list.append(button);
+      }
+      if (!(state.issues || []).length) list.append(el("p", "muted", "No issues yet."));
+      app.append(form, list);
+    }
+
+    async function renderIssue(id, number) {
+      app.replaceChildren();
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      const issue = (state.issues || []).find((item) => String(item.number) === String(number));
+      repoHead(state.project, id, "/issues");
+      if (!issue) {
+        app.append(el("p", "muted", "That issue is not on this repository."));
+        return;
+      }
+      const card = el("article", "panel stack");
+      card.append(el("h2", "", issue.title));
+      card.append(el("p", "meta", "#" + issue.number + " · " + issue.status + " · " + issue.author));
+      card.append(el("p", "", issue.body || "No description."));
+      for (const comment of issue.comments) card.append(el("p", "meta", comment.author + ": " + comment.body));
+      const toggle = el("button", "btn", issue.status === "open" ? "Close issue" : "Reopen issue");
+      toggle.addEventListener("click", async () => {
+        await api("/api/projects/" + encodeURIComponent(id) + "/issues/" + issue.number + "/" + (issue.status === "open" ? "close" : "reopen"), { method: "POST" });
+        renderIssue(id, number);
+      });
+      card.append(commentForm(id, "issues", issue.number, () => renderIssue(id, number)), toggle);
+      app.append(card);
+    }
+
+    async function renderPulls(id) {
+      app.replaceChildren();
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      repoHead(state.project, id, "/pulls");
+      const form = el("form", "panel stack");
+      form.append(el("h2", "", "New pull request"));
+      form.append(field("Title", "title", "Keep the checkout default off"));
+      form.append(field("What this changes", "body", "Describe the canon change.", true));
+      form.append(field("Paths", "paths", "src/flags.ts"));
+      form.append(field("Patch", "patch", "Paste a unified diff", true));
+      const submit = el("button", "btn primary", "Open pull request");
+      submit.type = "submit";
+      form.append(submit);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        const paths = String(data.get("paths") || "").split(",").map((item) => item.trim()).filter(Boolean);
+        try {
+          const body = await api("/api/projects/" + encodeURIComponent(id) + "/pulls", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: data.get("title"),
+              body: data.get("body"),
+              goal: data.get("body"),
+              paths,
+              patch: data.get("patch") || "",
+            }),
+          });
+          go("/p/" + encodeURIComponent(id) + "/pulls/" + body.pull.number);
+        } catch (error) {
+          if (/sign in/i.test(error.message)) go("/login?next=" + encodeURIComponent(location.pathname));
+          else alert(error.message);
+        }
+      });
+      const list = el("div", "list");
+      for (const pull of state.pulls || []) {
+        const button = el("button", "panel rowline");
+        const failing = (pull.checks || []).some((check) => check.status === "fail");
+        button.append(el("strong", "", "#" + pull.number + "  " + pull.title));
+        button.append(el("span", failing ? "fail" : "pass", pull.status));
+        button.addEventListener("click", () => go("/p/" + encodeURIComponent(id) + "/pulls/" + pull.number));
+        list.append(button);
+      }
+      if (!(state.pulls || []).length) list.append(el("p", "muted", "No pull requests yet. Push with git or open one here."));
+      app.append(form, list);
+    }
+
+    async function renderPull(id, number) {
+      app.replaceChildren();
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      const pull = (state.pulls || []).find((item) => String(item.number) === String(number));
+      repoHead(state.project, id, "/pulls");
+      if (!pull) {
+        app.append(el("p", "muted", "That pull request is not on this repository."));
+        return;
+      }
+      const card = el("article", "panel stack");
+      card.append(el("h2", "", pull.title));
+      card.append(el("p", "meta", "#" + pull.number + " · " + pull.status + " · " + pull.author + " wants to merge " + pull.head + " into " + pull.base));
+      card.append(el("p", "", pull.body || pull.title));
+      for (const check of pull.checks || []) {
+        card.append(el("p", check.status === "pass" ? "pass" : "fail", check.status.toUpperCase() + "  " + check.name + " — " + check.detail));
+      }
+      if (pull.patch) card.append(el("pre", "", pull.patch));
+      for (const comment of pull.comments) card.append(el("p", "meta", comment.author + ": " + comment.body));
+      if (pull.status === "open") {
+        const merge = el("button", "btn primary", "Merge");
+        const close = el("button", "btn", "Close");
+        merge.addEventListener("click", async () => {
+          try {
+            await api("/api/projects/" + encodeURIComponent(id) + "/pulls/" + pull.number + "/merge", { method: "POST" });
+            renderPull(id, number);
+          } catch (error) {
+            alert(error.message);
+          }
+        });
+        close.addEventListener("click", async () => {
+          await api("/api/projects/" + encodeURIComponent(id) + "/pulls/" + pull.number + "/close", { method: "POST" });
+          renderPull(id, number);
+        });
+        const actions = el("div", "row");
+        actions.append(merge, close);
+        card.append(actions);
+      }
+      card.append(commentForm(id, "pulls", pull.number, () => renderPull(id, number)));
+      app.append(card);
+    }
+
+    function commentForm(id, kind, number, again) {
+      const form = el("form", "row");
+      const input = document.createElement("input");
+      input.name = "body";
+      input.placeholder = "Leave a review comment";
+      const submit = el("button", "btn", "Comment");
+      submit.type = "submit";
+      form.append(input, submit);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = String(new FormData(form).get("body") || "").trim();
+        if (!body) return;
+        await api("/api/projects/" + encodeURIComponent(id) + "/" + kind + "/" + number + "/comments", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ body }),
+        });
+        again();
+      });
+      return form;
+    }
+
+    async function renderActions(id) {
+      app.replaceChildren();
+      const state = await api("/api/projects/" + encodeURIComponent(id) + "/state");
+      const runs = await api("/api/projects/" + encodeURIComponent(id) + "/actions");
+      repoHead(state.project, id, "/actions");
+      const list = el("div", "list");
+      if (!(runs.runs || []).length) list.append(el("p", "muted", "No check runs yet. Open a pull request to start one."));
+      for (const run of runs.runs || []) {
+        const card = el("article", "panel stack");
+        card.append(el("h2", "", run.title));
+        card.append(el("p", run.status === "pass" ? "pass" : "fail", run.status.toUpperCase() + "  " + run.name));
+        for (const check of run.checks || []) card.append(el("p", "meta", check.status + "  " + check.name));
+        list.append(card);
+      }
+      app.append(list);
+    }
+
+    api("/api/auth/me").then((body) => {
+      me = body.user;
+      paintNav();
+      if (location.pathname === "/") renderLanding();
+    }).catch(() => paintNav());
     route();
   </script>
 </body>
