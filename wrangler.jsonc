@@ -15,6 +15,10 @@
       "class_name": "RefereeWorkflow"
     }
   ],
+  // Artifacts needs Workers Paid. After upgrading, uncomment both blocks,
+  // run `npm run deploy`, then `npm run swarm -- --seed` once to create the canon.
+  // "artifacts": [{ "binding": "ARTIFACTS", "namespace": "locus" }],
+  // "vars": { "CANON_REPO": "canon" },
   "queues": {
     "producers": [{ "binding": "EVENTS", "queue": "locus-artifact-events" }],
     "consumers": [{ "queue": "locus-artifact-events", "max_batch_size": 10 }]

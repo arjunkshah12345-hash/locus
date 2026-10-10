@@ -44,9 +44,45 @@ function sharesSymbol(intents: Intent[]): boolean {
   return false;
 }
 
+// Checks read from the fork's pushed files. Used when the board can see the
+// fork in Artifacts; otherwise the referee falls back to the goal text.
+export function scoreFlagsSource(source: string | null): CheckResult[] {
+  if (source === null) {
+    return [
+      { name: "canon default stays off", passed: true, detail: "src/flags.ts is unchanged in this fork.", source: "fork" },
+    ];
+  }
+  const flipped = /newCheckout\s*:\s*true/.test(source);
+  const kept = /newCheckout\s*:\s*false/.test(source);
+  const writer = /export function setFlag\s*\(/.test(source);
+  return [
+    {
+      name: "canon default stays off",
+      passed: kept && !flipped,
+      detail: flipped
+        ? "The pushed src/flags.ts sets newCheckout to true."
+        : kept
+          ? "The pushed src/flags.ts keeps newCheckout false."
+          : "The pushed src/flags.ts no longer declares newCheckout.",
+      source: "fork",
+    },
+    {
+      name: "setFlag still exported",
+      passed: writer,
+      detail: writer ? "setFlag is still exported." : "The pushed src/flags.ts removed setFlag.",
+      source: "fork",
+    },
+  ];
+}
+
+function checksFor(intent: Intent): CheckResult[] {
+  if (intent.checks?.some((check) => check.source === "fork")) return intent.checks;
+  return scoreIntent(intent);
+}
+
 export function referee(intents: Intent[]): Decision {
   const checks: Record<string, CheckResult[]> = {};
-  for (const intent of intents) checks[intent.id] = scoreIntent(intent);
+  for (const intent of intents) checks[intent.id] = checksFor(intent);
   const passers = intents.filter((intent) => checks[intent.id].every((check) => check.passed));
   const memberIds = intents.map((intent) => intent.id);
 
