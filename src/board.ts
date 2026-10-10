@@ -1,7 +1,7 @@
 import { LeaseError, LeaseStore, type Intent, type Surface } from "./lease.ts";
-import { forkIntent, type ArtifactsNamespace } from "./artifacts.ts";
+import { ensureCanonRepo, forkIntent, readForkHead, type ArtifactsNamespace } from "./artifacts.ts";
 import { runDemo } from "./demo-script.ts";
-import { applyReferee } from "./referee.ts";
+import { applyReferee, scoreFlagsSource } from "./referee.ts";
 import { handleMcp, type McpMessage } from "./mcp.ts";
 import { previewUrlFor, type PushEvent } from "./preview.ts";
 import {
@@ -212,7 +212,19 @@ export class LeaseBoard implements DurableObject {
     await this.state.storage.put(`activity:${this.projectId}`, items.slice(0, 40));
   }
 
+  // Requests run one at a time. A claim awaits Artifacts (fork, readFile) and a
+  // Durable Object accepts other requests during that kind of I/O, so without
+  // this two concurrent claims could each load the board, and the later save
+  // would drop the earlier claim. It also keeps this.projectId stable per request.
+  private queue: Promise<unknown> = Promise.resolve();
+
   async fetch(request: Request): Promise<Response> {
+    const run = this.queue.then(() => this.handle(request));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
       if (url.pathname === "/auth/me" && request.method === "GET") {
@@ -631,6 +643,8 @@ export class LeaseBoard implements DurableObject {
         return await this.claim(request);
       }
       if (url.pathname === "/sample" && request.method === "POST") {
+        const actor = await this.requireActor(request);
+        if (actor instanceof Response) return actor;
         const { intents, log, frames } = runDemo(Date.now());
         const store = new LeaseStore(intents);
         await this.save(store);
@@ -638,6 +652,8 @@ export class LeaseBoard implements DurableObject {
         return json({ intents: store.list(Date.now()), log, frames, activity: await this.activity() });
       }
       if (url.pathname === "/demo/seed" && request.method === "POST") {
+        const actor = await this.requireActor(request);
+        if (actor instanceof Response) return actor;
         const { intents, log, frames } = runDemo(Date.now());
         const store = new LeaseStore(intents);
         await this.save(store);
@@ -692,10 +708,31 @@ export class LeaseBoard implements DurableObject {
         if (intent) await this.note(`Push ${event.payload?.after ?? ""} on ${repoName}.`);
         return json({ intent });
       }
+      if (url.pathname === "/canon" && request.method === "POST") {
+        const owner = await this.requireActor(request);
+        if (owner instanceof Response) return owner;
+        if (!this.env.ARTIFACTS || !this.env.CANON_REPO) {
+          return json({ error: "Artifacts is not bound on this Worker", code: "no_artifacts" }, 409);
+        }
+        const canon = await ensureCanonRepo(this.env.ARTIFACTS, this.env.CANON_REPO);
+        await this.note(`${owner.name} ${canon.created ? "created" : "opened"} the canon repo ${canon.name}.`);
+        return json({ canon });
+      }
       if (url.pathname === "/mcp" && request.method === "POST") {
         const message = (await request.json()) as McpMessage;
         const store = await this.load();
         try {
+          if (message.method === "tools/call" && message.params?.name === "claim") {
+            // Claims from MCP get the same Artifacts fork as REST claims.
+            const result = handleMcp(store, message, Date.now()) as { content: { text: string }[] };
+            const claimed = JSON.parse(result.content[0].text) as { intent: Intent; overlap: string[]; brief: string };
+            const forked = await this.forkFor(store, claimed.intent);
+            await this.save(store);
+            const intent = store.get(claimed.intent.id) ?? claimed.intent;
+            await this.note(`${intent.agentId} claimed ${intent.surface.paths.join(", ") || "a surface"} over MCP.`);
+            const text = JSON.stringify({ ...claimed, intent, token: forked.token, agentsMd: forked.agentsMd });
+            return json({ jsonrpc: "2.0", id: message.id ?? null, result: { content: [{ type: "text", text }] } });
+          }
           const result = handleMcp(store, message, Date.now());
           await this.save(store);
           return json({ jsonrpc: "2.0", id: message.id ?? null, result });
@@ -721,6 +758,13 @@ export class LeaseBoard implements DurableObject {
         const intent = store.get(decodeURIComponent(one[1]));
         if (!intent) return json({ error: "Unknown intent", code: "missing" }, 404);
         return json({ intent });
+      }
+
+      const pushed = url.pathname.match(/^\/intents\/([^/]+)\/pushed$/);
+      if (pushed && request.method === "POST") {
+        const actor = await this.requireActor(request);
+        if (actor instanceof Response) return actor;
+        return await this.recordPush(decodeURIComponent(pushed[1]), request);
       }
 
       const match = url.pathname.match(/^\/intents\/([^/]+)\/(heartbeat|ready|land|decide|context)$/);
@@ -877,8 +921,21 @@ export class LeaseBoard implements DurableObject {
       Date.now(),
     );
 
-    let token: string | null = null;
-    let agentsMd: string | null = null;
+    const { token, agentsMd } = await this.forkFor(store, intent);
+
+    await this.save(store);
+    const stored = store.snapshot().find((item) => item.id === intent.id);
+    await this.note(`${stored?.agentId ?? agentId} claimed ${stored?.surface.paths.join(", ") || "a surface"}.`);
+    const brief = store.brief(Date.now());
+    return json({ intent: stored ?? intent, overlap, token, agentsMd, brief }, 201);
+  }
+
+  // One fork per intent. With Artifacts bound this is a real repo forked from
+  // the canon; without it the board keeps a memory fork so the UI still works.
+  private async forkFor(
+    store: LeaseStore,
+    intent: Intent,
+  ): Promise<{ token: string | null; agentsMd: string | null }> {
     if (this.env.ARTIFACTS && this.env.CANON_REPO) {
       try {
         const forked = await forkIntent(
@@ -887,22 +944,50 @@ export class LeaseBoard implements DurableObject {
           `i-${intent.id}`.slice(0, 63),
         );
         store.attachFork(intent.id, { forkRepo: forked.name, remote: forked.remote });
-        token = forked.token;
-        agentsMd = forked.agentsMd;
+        return { token: forked.token, agentsMd: forked.agentsMd };
       } catch (error) {
         const message = error instanceof Error ? error.message : "fork failed";
         store.attachFork(intent.id, { forkError: message });
+        return { token: null, agentsMd: null };
       }
-    } else {
-      const repo = `i-${intent.id}`.slice(0, 63);
-      store.attachFork(intent.id, { forkRepo: repo, remote: `memory://locus/${repo}` });
-      store.notePush(repo, "pending", intent.surface.paths);
     }
+    const repo = `i-${intent.id}`.slice(0, 63);
+    store.attachFork(intent.id, { forkRepo: repo, remote: `memory://locus/${repo}` });
+    store.notePush(repo, "pending", intent.surface.paths);
+    return { token: null, agentsMd: null };
+  }
 
+  // An agent says it pushed. With Artifacts bound, the board reads the fork head
+  // and the claimed files itself and scores src/flags.ts from what is really there.
+  private async recordPush(id: string, request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => ({}))) as {
+      commit?: string;
+      files?: string[];
+      flagsSource?: string | null;
+    };
+    const store = await this.load();
+    const intent = store.get(id);
+    if (!intent) return json({ error: "Unknown intent", code: "missing" }, 404);
+    if (!intent.forkRepo) return json({ error: "Intent has no fork", code: "no_fork" }, 409);
+    const paths = body.files?.length ? body.files : intent.surface.paths;
+    let commit = body.commit ?? "reported";
+    let flags: string | null | undefined = body.flagsSource;
+    let verified = false;
+    if (this.env.ARTIFACTS && !intent.forkRepo.startsWith("memory") && intent.remote?.startsWith("https://")) {
+      const head = await readForkHead(this.env.ARTIFACTS, intent.forkRepo, paths);
+      commit = head.commit ?? commit;
+      if (paths.includes("src/flags.ts")) flags = head.files["src/flags.ts"] ?? null;
+      verified = true;
+    }
+    const updated = store.notePush(intent.forkRepo, commit, paths);
+    if (flags !== undefined && paths.includes("src/flags.ts")) {
+      const checks = scoreFlagsSource(flags).map((check) =>
+        verified ? check : { ...check, detail: `${check.detail} (reported by the agent, not read from Artifacts)` },
+      );
+      store.setChecks(id, checks);
+    }
     await this.save(store);
-    const stored = store.snapshot().find((item) => item.id === intent.id);
-    await this.note(`${stored?.agentId ?? agentId} claimed ${stored?.surface.paths.join(", ") || "a surface"}.`);
-    const brief = store.brief(Date.now());
-    return json({ intent: stored ?? intent, overlap, token, agentsMd, brief }, 201);
+    await this.note(`${intent.agentId} pushed ${commit.slice(0, 12)} to ${intent.forkRepo}${verified ? " (read back from Artifacts)" : ""}.`);
+    return json({ intent: store.get(id) ?? updated, verified });
   }
 }

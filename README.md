@@ -4,6 +4,46 @@ Agents claim a surface, work in their own fork, and the canon only lands the cha
 
 Create a project, claim a path or a symbol, and watch overlaps land in the arena. **Load flag swarm** drops eight agents onto one canon. **Watch it arrive** plays that swarm in. **Resolve arena** folds the passing edits into one canon change and writes `.locus/landed/<id>.json`. The spec is [PLAN.md](PLAN.md).
 
+## Architecture
+
+```
+ agents (CLI, MCP, swarm script)
+        |  HTTPS + session bearer
+        v
+ Worker  src/index.ts ----------------------------+
+   /api/*  -> LeaseBoard Durable Object            |  queue consumer
+   /mcp    -> LeaseBoard Durable Object            |  (locus-artifact-events)
+   /preview/:id                                    |
+        |                                          v
+ LeaseBoard DO  src/board.ts                 RefereeWorkflow  src/workflow.ts
+   leases, arena, why capsules,              durable step: score the arena,
+   projects, issues, pulls, sessions         fold or land
+        |
+        |  Workers binding ARTIFACTS
+        v
+ Cloudflare Artifacts (namespace "locus")
+   canon      the repo that lands winners
+   i-<intent> one fork per claim, with its own write token
+```
+
+| Piece | Cloudflare product | What it does |
+| --- | --- | --- |
+| Front door | Workers | Routes `/api`, `/mcp`, `/preview`, serves the app, consumes the push queue. |
+| Lease board | Durable Objects (SQLite) | One strongly consistent board per deployment. Holds every claim, the arena, context notes and landed capsules. Requests run one at a time so concurrent claims never overwrite each other. |
+| Forks | Artifacts | Each claim forks the canon into `i-<intent>` and returns a fork write token once. `AGENTS.md` is read from the canon with `readFile` and handed to the agent. |
+| Push check | Artifacts binding | `POST /intents/:id/pushed` reads the fork head with `log` and the pushed files with `readFile`, so the referee scores what is really in the fork, not what the agent says. |
+| Referee | Workflows | Scores the contended intents and lands one, folds the passing ones, or asks a person. |
+| Push events | Queues + Event Subscriptions | Account-level `artifacts` events cover fork and delete. `cf.artifacts.repo.pushed` is repository-level, so `npm run subscribe` takes `LOCUS_REPO` for the repo you want to watch. |
+
+The lifecycle of one agent:
+
+1. `POST /intents` with a surface (paths and symbols). The board records the lease, forks the canon in Artifacts, and returns the fork remote, a write token, the canon `AGENTS.md`, and a brief of what other agents hold.
+2. The agent clones its fork with `http.extraHeader="Authorization: Bearer <token>"`, edits, commits, and pushes `main` on the fork.
+3. `POST /intents/:id/pushed`. The board reads the fork back from Artifacts and records the head commit and checks.
+4. `POST /intents/:id/context` and `/ready`.
+5. Free lanes land. Overlapping lanes go to the referee, which picks one, folds the compatible ones, or flags the arena for a person.
+6. The canon gets the merge and a `.locus/landed/<id>.md` capsule, so `why` survives in git.
+
 ## Run it
 
 ```bash
@@ -13,6 +53,19 @@ npm run dev
 ```
 
 The live app is https://locus.arjunkshah21.workers.dev. `npm run demo` prints the same flag-service story with no Cloudflare account.
+
+## Swarm demo (8+ agents)
+
+```bash
+npm run dev                      # terminal 1
+npm run swarm                    # terminal 2, 10 agents against http://127.0.0.1:8787
+npm run swarm -- --agents 12     # minimum is 8
+LOCUS_URL=https://locus.arjunkshah21.workers.dev LOCUS_EMAIL=you@example.com LOCUS_PASSWORD=... npm run swarm
+```
+
+`scripts/swarm.mjs` signs in, opens a fresh project, and starts every agent at once. Seven agents take free lanes. Three take `src/flags.ts`: one turns `newCheckout` on, one audits `setFlag`, one adds a staged rollout flag. Free lanes land, the referee reads the three pushed versions of `src/flags.ts`, rejects the one that flips the default, folds the other two, and the script merges the winners into the canon and pushes it with the `.locus/landed/` capsules. The timeline is printed and saved to `timeline.txt` in the work dir.
+
+With Artifacts bound, the canon and every fork are real Artifacts repos and the board reads each push back through the binding. Without it, the same git flow runs against a local bare repo and the checks are marked as reported by the agent.
 
 ## What you can do
 
@@ -63,6 +116,8 @@ Project routes live under `/api/projects/:id`. The same actions exist on the def
 | `POST` | `/api/projects/:id/intents/:intent/land` | Land a free intent and write its why capsule |
 | `POST` | `/api/projects/:id/intents/:intent/decide` | Land this intent and abandon overlaps |
 | `POST` | `/api/projects/:id/intents/:intent/context` | Append a context note |
+| `POST` | `/api/projects/:id/intents/:intent/pushed` | Record a push. With Artifacts bound, the board reads the head and files from the fork. |
+| `POST` | `/api/projects/:id/canon` | Create or open the canon Artifacts repo and return its remote and a one-hour write token |
 | `POST` | `/api/projects/:id/referee` | Score the arena and fold or land |
 | `POST` | `/api/projects/:id/sample` | Load the eight-agent story |
 | `GET` | `/api/projects/:id/why?path=src/flags.ts` | Landed capsules for that path |
@@ -95,14 +150,22 @@ The Worker uses a Durable Object lease board, the `locus-artifact-events` queue,
 
 ## Artifacts
 
-Artifacts is Workers Paid only. On this account the binding deploy returns `10403` until the plan is upgraded, so a claim records a memory fork. After the upgrade, add:
+Artifacts needs Workers Paid. Until the binding is deployed, `/health` reports `"artifacts": false` and a claim records a memory fork. To turn it on:
+
+1. Upgrade the account to Workers Paid in the dashboard.
+2. Uncomment the `artifacts` and `vars` blocks in `wrangler.jsonc`:
 
 ```jsonc
 "artifacts": [{ "binding": "ARTIFACTS", "namespace": "locus" }],
 "vars": { "CANON_REPO": "canon" }
 ```
 
-A claim then calls `get`, `info`, `readFile` for `AGENTS.md`, `fork`, and `createToken("write")` if the fork result has no token. The board does not store the token. Push events on `locus-artifact-events` update the matching intent and start `RefereeWorkflow`.
+3. `npx wrangler deploy`, then check `/health` shows `"artifacts": true`.
+4. `npm run swarm` against the live URL. The first run creates the canon and seeds it from `fixtures/sample`.
+
+A claim calls `get` and `info` on the canon, `readFile` for `AGENTS.md`, `fork`, and `createToken("write")` if the fork result has no token (`createToken` returns `{ plaintext, expiresAt }`). The board does not store the token. `POST /intents/:id/pushed` calls `log({ limit: 1 })` and `readFile` on the fork.
+
+Optional push events: `CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... LOCUS_QUEUE_ID=... LOCUS_REPO=canon npm run subscribe`. Push events land on `locus-artifact-events`, update the matching intent, and start `RefereeWorkflow`. The board does not need them, because agents report pushes and the board verifies them.
 
 ## Submit
 
@@ -114,7 +177,7 @@ Form, once, by hand: https://www.cloudflare.com/git-competition/submit/
 | Live app | https://locus.arjunkshah21.workers.dev |
 | Source | https://github.com/arjunkshah12345-hash/locus |
 | License | Apache-2.0 |
-| Run | Open the live app, open **Storefront flags**, choose **Watch it arrive**, then **Resolve arena**. Locally: `npm install && npm test && npm run dev` |
+| Run | Open the live app, open **Storefront flags**, choose **Watch it arrive**, then **Resolve arena**. Locally: `npm install && npm test && npm run dev`, then `npm run swarm` |
 
 The form also wants a 5–10 minute video. Record the live board: the swarm arriving, the three diffs on `src/flags.ts`, the synthesis that keeps `newCheckout` off, then Ask why on that file.
 

@@ -9,6 +9,8 @@ export type CheckResult = {
   name: string;
   passed: boolean;
   detail: string;
+  // "fork" when the check read the agent's pushed files from Artifacts.
+  source?: "fork" | "goal";
 };
 
 export type Capsule = {

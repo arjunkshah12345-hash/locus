@@ -43,6 +43,11 @@ export default {
       return board(env).fetch(new Request("https://locus/mcp", request));
     }
     if (url.pathname.startsWith("/api/")) {
+      // Push events reach the board only through the queue consumer below.
+      // A public POST to /api/events would let anyone fake a push.
+      if (/^\/api\/(projects\/[^/]+\/)?events$/.test(url.pathname)) {
+        return Response.json({ error: "not found", code: "not_found" }, { status: 404 });
+      }
       const next = new URL(request.url);
       next.pathname = url.pathname.slice("/api".length) || "/";
       return board(env).fetch(new Request(next, request));
